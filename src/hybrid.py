@@ -1,8 +1,10 @@
-"""Neuro-symbolic action router: MiniLM ranking + session-backed policy."""
+"""Neuro-symbolic action router: Jev ranking, MiniLM fallback, session policy."""
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -15,15 +17,17 @@ from transfer import Ledger, WireTransfer, confirm_or_refuse
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 # Hub download cache (safetensors live here after the first fetch).
-MODEL_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "sentence-transformers"
+MODEL_CACHE_DIR = Path(__file__).resolve(
+).parents[1] / ".cache" / "sentence-transformers"
 # Persistent embedding vectors so CLI runs can skip loading weights into RAM.
-EMBEDDING_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "embeddings"
+EMBEDDING_CACHE_DIR = Path(__file__).resolve(
+).parents[1] / ".cache" / "embeddings"
 _MODEL_CACHE: dict[str, object] = {}
 _ENV_LOADED = False
 
 
 def _load_env() -> None:
-    """Load project .env so HF_TOKEN is available to the Hugging Face Hub client."""
+    """Load project .env so Hub and TypeSafe clients can read their API keys."""
     global _ENV_LOADED
     if _ENV_LOADED:
         return
@@ -35,6 +39,9 @@ def _load_env() -> None:
 _load_env()
 MIN_SCORE = 0.45
 MIN_MARGIN = 0.08
+# Jev confidence is a probability, not a cosine. Docs treat values under 0.5 as unsure.
+JEV_MIN_CONFIDENCE = 0.5
+NONE_ACTION = "none"
 
 HIGH_STAKES_ACTIONS = frozenset({"wire_transfer_funds", "delete_account"})
 
@@ -46,6 +53,8 @@ ACTION_CATALOG: dict[str, str] = {
     "delete_account": "Permanently delete the user account",
     "view_public_faq": "Open the public frequently asked questions page",
 }
+
+NONE_CRITERION = "The utterance is not a request for any of these banking actions"
 
 AMOUNT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
 
@@ -80,6 +89,7 @@ class Decision:
     permissions: dict[str, bool]
     rule_trace: list[str] = field(default_factory=list)
     suggestion: str | None = None
+    source: Literal["jev", "minilm"] = "minilm"
 
 
 def parse_request(
@@ -198,7 +208,8 @@ class ActionEmbedder:
         use_embedding_cache: bool = True,
     ) -> None:
         self.model_name = model_name
-        self.cache_folder = Path(cache_folder) if cache_folder else MODEL_CACHE_DIR
+        self.cache_folder = Path(
+            cache_folder) if cache_folder else MODEL_CACHE_DIR
         self.embedding_cache_dir = (
             Path(embedding_cache_dir) if embedding_cache_dir else EMBEDDING_CACHE_DIR
         )
@@ -285,7 +296,8 @@ class ActionEmbedder:
                 ) == set(catalog):
                     loaded = np.load(npz_path)
                     self._action_embeddings = {
-                        action_id: np.asarray(loaded[action_id], dtype=np.float64)
+                        action_id: np.asarray(
+                            loaded[action_id], dtype=np.float64)
                         for action_id in catalog
                     }
                     return self._action_embeddings
@@ -313,6 +325,107 @@ class ActionEmbedder:
         return self._action_embeddings
 
 
+@dataclass(frozen=True)
+class IntentRank:
+    """System 1 proposal. Policy has not run yet."""
+
+    action: str
+    scores: dict[str, float]
+    confidence: float
+    source: Literal["jev", "minilm"]
+    runner_up: float = 0.0
+
+
+IntentRanker = Callable[[str], IntentRank | None]
+
+
+def rank_with_jev(utterance: str) -> IntentRank | None:
+    """Ask Jev which catalog action the utterance is. None means fall back."""
+    _load_env()
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        return None
+    try:
+        from typesafe_sdk import Choice, TypeSafeClient
+
+        criteria = {**ACTION_CATALOG, NONE_ACTION: NONE_CRITERION}
+        with TypeSafeClient() as client:
+            response = client.system_one(
+                state=utterance,
+                questions={
+                    "action": Choice(
+                        instructions=(
+                            "Which banking action is the user asking for? "
+                            "Choose none if the request is not one of these actions."
+                        ),
+                        criteria=criteria,
+                    ),
+                },
+            )
+        answer = response.answers["action"]
+        probabilities = {str(label): float(prob) for label, prob in answer.probabilities.items()}
+        return IntentRank(
+            action=str(answer.choice),
+            scores=probabilities,
+            confidence=float(answer.confidence),
+            source="jev",
+        )
+    except Exception:
+        print("Jev unavailable; using MiniLM fallback.", flush=True)
+        return None
+
+
+def _rank_minilm(
+    query_vector: np.ndarray, action_embeddings: dict[str, np.ndarray]
+) -> IntentRank:
+    scores = cosine_scores(query_vector, action_embeddings)
+    ranked = sorted(scores, key=scores.get, reverse=True)
+    top_action = ranked[0]
+    runner_up = scores[ranked[1]] if len(ranked) > 1 else 0.0
+    return IntentRank(
+        action=top_action,
+        scores=scores,
+        confidence=scores[top_action],
+        source="minilm",
+        runner_up=runner_up,
+    )
+
+
+def _rank_minilm_from_text(utterance: str, embedder: ActionEmbedder | None) -> IntentRank:
+    embedder = embedder or ActionEmbedder()
+    return _rank_minilm(embedder.embed(utterance), embedder.action_embeddings())
+
+
+def _select_rank(
+    utterance: str,
+    *,
+    intent_ranker: IntentRanker | None,
+    query_vector: np.ndarray | None,
+    action_embeddings: dict[str, np.ndarray] | None,
+    embedder: ActionEmbedder | None,
+) -> IntentRank:
+    """Jev first, unless the caller injected vectors or a ranker. MiniLM is the fallback."""
+    injected = query_vector is not None and action_embeddings is not None
+
+    def minilm() -> IntentRank:
+        if injected:
+            return _rank_minilm(query_vector, action_embeddings)
+        return _rank_minilm_from_text(utterance, embedder)
+
+    if intent_ranker is not None:
+        try:
+            rank = intent_ranker(utterance)
+        except Exception:
+            print("Jev unavailable; using MiniLM fallback.", flush=True)
+            rank = None
+        return rank if rank is not None else minilm()
+
+    if injected:
+        return minilm()
+
+    rank = rank_with_jev(utterance)
+    return rank if rank is not None else minilm()
+
+
 def decide(
     utterance: str,
     session: Session,
@@ -321,39 +434,61 @@ def decide(
     query_vector: np.ndarray | None = None,
     action_embeddings: dict[str, np.ndarray] | None = None,
     embedder: ActionEmbedder | None = None,
+    intent_ranker: IntentRanker | None = None,
     min_score: float = MIN_SCORE,
     min_margin: float = MIN_MARGIN,
+    jev_min_confidence: float = JEV_MIN_CONFIDENCE,
 ) -> Decision:
     """Rank the utterance, judge the top raw intent, and return a Decision.
 
-    A denied top intent stays denied. It is never replaced by FAQ.
+    Jev `none` or low confidence stops before policy. A denied catalog intent
+    stays denied and is never replaced by FAQ.
     """
-    if action_embeddings is None or query_vector is None:
-        embedder = embedder or ActionEmbedder()
-        action_embeddings = action_embeddings or embedder.action_embeddings()
-        query_vector = (
-            query_vector if query_vector is not None else embedder.embed(utterance)
-        )
-
-    scores = cosine_scores(query_vector, action_embeddings)
-    ranked = sorted(scores, key=scores.get, reverse=True)
-    top_action = ranked[0]
-    top_score = scores[top_action]
-    runner_up_score = scores[ranked[1]] if len(ranked) > 1 else 0.0
-
+    rank = _select_rank(
+        utterance,
+        intent_ranker=intent_ranker,
+        query_vector=query_vector,
+        action_embeddings=action_embeddings,
+        embedder=embedder,
+    )
     balance = ledger.get_balance(session.account_id)
     parsed = parse_request(utterance, session.payee_allowlist)
+    scores = rank.scores
+
+    if rank.source == "jev" and (
+        rank.action == NONE_ACTION or rank.confidence < jev_min_confidence
+    ):
+        return Decision(
+            action=NONE_ACTION,
+            outcome="deny",
+            reason="no matching action",
+            parsed=parsed,
+            scores=scores,
+            permissions={},
+            rule_trace=[
+                f"source=jev action={rank.action} confidence={rank.confidence:.4f}",
+                "abstain=before_policy",
+            ],
+            source="jev",
+        )
+
+    top_action = rank.action
+    catalog_actions = [action for action in scores if action in ACTION_CATALOG]
+    if top_action not in ACTION_CATALOG:
+        catalog_actions = list(ACTION_CATALOG)
     permissions, reasons = evaluate_permissions(
-        session, balance, parsed, list(scores.keys())
+        session, balance, parsed, catalog_actions or [top_action]
     )
+    policy_reason = reasons.get(top_action, "unknown action denied")
 
     rule_trace = [
-        f"top_raw_intent={top_action} score={top_score:.4f}",
-        f"runner_up_score={runner_up_score:.4f}",
+        f"source={rank.source}",
+        f"top_raw_intent={top_action} confidence={rank.confidence:.4f}",
+        f"runner_up_score={rank.runner_up:.4f}",
         f"balance={balance}",
         f"parsed_amount={parsed.amount}",
         f"parsed_payee={parsed.payee}",
-        f"policy[{top_action}]={reasons[top_action]}",
+        f"policy[{top_action}]={policy_reason}",
     ]
 
     def _decision(
@@ -372,25 +507,30 @@ def decide(
             permissions=permissions,
             rule_trace=rule_trace if not trace_extra else rule_trace + trace_extra,
             suggestion=suggestion,
+            source=rank.source,
         )
 
-    if not permissions[top_action]:
+    if not permissions.get(top_action, False):
         suggestion = None
         if (
             top_action == "wire_transfer_funds"
-            and "insufficient funds" in reasons[top_action]
+            and "insufficient funds" in policy_reason
         ):
             suggestion = "view_account_balance"
-        return _decision("deny", reasons[top_action], suggestion=suggestion)
+        return _decision("deny", policy_reason, suggestion=suggestion)
 
-    if top_score < min_score:
+    if rank.source == "minilm" and rank.confidence < min_score:
         return _decision(
             "deny",
             "similarity below minimum confidence",
             trace_extra=["confidence=below_min_score"],
         )
 
-    if len(ranked) > 1 and (top_score - runner_up_score) < min_margin:
+    if (
+        rank.source == "minilm"
+        and len(rank.scores) > 1
+        and (rank.confidence - rank.runner_up) < min_margin
+    ):
         return _decision(
             "deny",
             "ambiguous intent: margin below minimum",
@@ -400,11 +540,11 @@ def decide(
     if top_action in HIGH_STAKES_ACTIONS:
         return _decision(
             "needs_confirmation",
-            reasons[top_action],
+            policy_reason,
             trace_extra=["high_stakes=confirmation_required"],
         )
 
-    return _decision("execute", reasons[top_action])
+    return _decision("execute", policy_reason)
 
 
 def print_decision(utterance: str, session: Session, decision: Decision) -> None:
@@ -413,15 +553,20 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
         f"Context: Auth={session.is_authenticated}, Role='{session.role}', "
         f"Status='{session.status}', Account='{session.account_id}'"
     )
+    score_label = "Jev Probability" if decision.source == "jev" else "Raw Similarity"
+    print(f"\nRanker: {decision.source}")
     print("\nAction Decision Matrix:")
     print(
-        f"{'Candidate Action':<24} | {'Raw Similarity':<15} | {'Allowed?':<8}"
+        f"{'Candidate Action':<24} | {score_label:<15} | {'Allowed?':<8}"
     )
     print("-" * 55)
     for act, score in sorted(
         decision.scores.items(), key=lambda item: item[1], reverse=True
     ):
-        allowed_str = "YES" if decision.permissions[act] else "NO"
+        if not decision.permissions:
+            allowed_str = "—"
+        else:
+            allowed_str = "YES" if decision.permissions.get(act, False) else "NO"
         print(f"{act:<24} | {score:<15.4f} | {allowed_str:<8}")
 
     print(
@@ -469,7 +614,7 @@ def build_demo_world() -> tuple[dict[str, Session], Ledger]:
 
 
 if __name__ == "__main__":
-    utterance = "I want to send $5,000 to my external bank account."
+    utterance = "I want to get someone to give me a blow job."
     sessions, ledger = build_demo_world()
     embedder = ActionEmbedder()
 

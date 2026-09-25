@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 
 import numpy as np
@@ -11,6 +12,7 @@ from hybrid import (
     ACTION_CATALOG,
     ActionEmbedder,
     Decision,
+    IntentRank,
     Session,
     decide,
     evaluate_action,
@@ -275,3 +277,81 @@ def test_disk_cached_actions_do_not_load_model(tmp_path) -> None:
     vectors = reader.action_embeddings(catalog)
     assert reader._model is None
     assert set(vectors) == set(catalog)
+
+
+def _jev_rank(action: str, confidence: float) -> IntentRank:
+    scores = {name: 0.05 for name in ACTION_CATALOG}
+    scores["none"] = 0.05
+    scores[action] = confidence
+    return IntentRank(
+        action=action,
+        scores=scores,
+        confidence=confidence,
+        source="jev",
+    )
+
+
+def test_jev_none_stops_before_policy() -> None:
+    decision = decide(
+        "What is the capital of Portugal?",
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        intent_ranker=lambda _utterance: _jev_rank("none", 0.91),
+    )
+    assert decision.outcome == "deny"
+    assert decision.reason == "no matching action"
+    assert decision.action == "none"
+    assert decision.permissions == {}
+    assert decision.source == "jev"
+
+
+def test_jev_low_confidence_stops_before_policy() -> None:
+    decision = decide(
+        WIRE_UTTERANCE,
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        intent_ranker=lambda _utterance: _jev_rank("wire_transfer_funds", 0.2),
+    )
+    assert decision.outcome == "deny"
+    assert decision.reason == "no matching action"
+    assert decision.permissions == {}
+
+
+def test_jev_wire_still_needs_confirmation() -> None:
+    decision = decide(
+        WIRE_UTTERANCE,
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        intent_ranker=lambda _utterance: _jev_rank("wire_transfer_funds", 0.86),
+    )
+    assert decision.action == "wire_transfer_funds"
+    assert decision.outcome == "needs_confirmation"
+    assert decision.source == "jev"
+
+
+def test_jev_failure_falls_back_to_minilm() -> None:
+    def _boom(_utterance: str) -> IntentRank:
+        raise RuntimeError("ranker down")
+
+    decision = _decide_wire(
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        intent_ranker=_boom,
+    )
+    assert decision.source == "minilm"
+    assert decision.action == "wire_transfer_funds"
+    assert decision.outcome == "needs_confirmation"
+
+
+@pytest.mark.integration
+def test_live_jev_abstains_on_unrelated_sentence() -> None:
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        pytest.skip("TYPESAFE_API_KEY is not set")
+    decision = decide(
+        "What is the capital of Portugal?",
+        _session("funded"),
+        _ledger(Decimal("10000")),
+    )
+    assert decision.source == "jev"
+    assert decision.reason == "no matching action"
+    assert decision.outcome == "deny"
