@@ -5,13 +5,29 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
+from dotenv import load_dotenv
 
 from transfer import Ledger, WireTransfer, confirm_or_refuse
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+_ENV_LOADED = False
+
+
+def _load_env() -> None:
+    """Load project .env so HF_TOKEN is available to the Hugging Face Hub client."""
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    load_dotenv(env_path, override=False)
+    _ENV_LOADED = True
+
+
+_load_env()
 MIN_SCORE = 0.45
 MIN_MARGIN = 0.08
 
@@ -152,6 +168,7 @@ class ActionEmbedder:
 
     def _load_model(self):
         if self._model is None:
+            _load_env()
             from sentence_transformers import SentenceTransformer
 
             self._model = SentenceTransformer(self.model_name)
