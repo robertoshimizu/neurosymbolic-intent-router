@@ -1,10 +1,12 @@
-"""Isolated sentence readings. Live cases call local MedGemma and only check shape."""
+"""Isolated sentence readings. Live cases call local MedGemma and print its JSON."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from intent_understanding import parse_model_json, read_sentence, reading_from_payload
+from intent_understanding import SECTIONS, parse_model_json, prompt_for, read_sentence
 
 SUPPLIER = (
     "The supplier stopped shipping shortly after Banco X withdrew the credit line. "
@@ -21,35 +23,28 @@ SENTENCES = (
 )
 
 
-def test_established_drops_inferred_and_unknown() -> None:
-    reading = reading_from_payload(
-        {
-            "claims": [
-                {"statement": "A patient fell.", "status": "EXPLICIT", "kind": "event"},
-                {
-                    "statement": "The fall caused the arrival.",
-                    "status": "INFERRED",
-                    "kind": "causal",
-                },
-                {"statement": "The nurse was on duty.", "status": "UNKNOWN", "kind": "concept"},
-            ]
-        }
-    )
-    established = reading.established()
-    assert len(established) == 1
-    assert established[0]["statement"] == "A patient fell."
+def test_prompt_appends_only_the_text() -> None:
+    prompt = prompt_for("What is the capital of Portugal?")
+    assert prompt.endswith('TEXT TO ANALYZE: What is the capital of Portugal?')
+    assert "Banco X" not in prompt
 
 
-def test_parse_model_json_rejects_a_list() -> None:
-    with pytest.raises(ValueError):
-        parse_model_json("[]")
+def test_parser_keeps_items_without_a_statement_field() -> None:
+    raw = """
+    {"entities": [{"entity": "Portugal", "type": "Country"}],
+     "relationships": [{"relation": "capital_of", "source": "Portugal", "target": "UNKNOWN"}],
+     "events": []}
+    """
+    payload = parse_model_json(raw)
+    assert payload["entities"][0]["entity"] == "Portugal"
+    assert payload["relationships"][0]["target"] == "UNKNOWN"
 
 
 @pytest.mark.integration
 @pytest.mark.parametrize("sentence", SENTENCES)
-def test_medgemma_returns_claims(sentence: str) -> None:
+def test_medgemma_reads_sentence(sentence: str) -> None:
     reading = read_sentence(sentence)
     print(f"\nSENTENCE: {sentence}")
-    for claim in reading.claims:
-        print(f"  {claim['status']:<9} {claim['kind']:<12} {claim['statement']}")
-    assert isinstance(reading.claims, tuple)
+    print(json.dumps(reading.raw, indent=2, ensure_ascii=False))
+    assert isinstance(reading.raw, dict)
+    assert any(isinstance(reading.raw.get(name), list) for name in SECTIONS)
