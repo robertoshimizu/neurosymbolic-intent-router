@@ -2,7 +2,7 @@
 
 This repository is a small experiment in routing a user's sentence to an action without letting the model authorize the action.
 
-Two pieces of work sit side by side. They are not connected.
+Two pieces of work sit side by side. They meet in one place: `route()` in `hybrid.py` uses the MedGemma splitter when Jev counts several requests.
 
 - `src/hybrid.py` and `src/transfer.py` route a banking sentence. A classifier proposes an action. Rules about the session and the ledger decide whether that action may run. A wire then moves through a state machine and debits an in-memory balance once.
 - `src/intent_understanding.py` is a separate reading of a sentence. It asks a local model what the text supports, and it does not know about the router.
@@ -57,7 +57,7 @@ MiniLM makes the gap visible. Each cosine is closeness to a description we wrote
 
 ## The open task: read the sentence first
 
-`src/intent_understanding.py` is the attempt to read a sentence before any router exists. It is not imported by `hybrid.py`.
+`src/intent_understanding.py` is the attempt to read a sentence before any router exists. `hybrid.py` imports only its `split_requests()`; the full reading is not used by the router.
 
 The prompt asks MedGemma 27B, through local Ollama with thinking turned off, to extract entities, relationships, events, causes, concepts, implicit facts, and temporal links. Each claim is marked:
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -13,6 +13,7 @@ from typing import Literal
 import numpy as np
 from dotenv import load_dotenv
 
+from intent_understanding import split_requests
 from transfer import Ledger, WireTransfer, confirm_or_refuse
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -44,6 +45,15 @@ JEV_MIN_CONFIDENCE = 0.5
 NONE_ACTION = "none"
 
 HIGH_STAKES_ACTIONS = frozenset({"wire_transfer_funds", "delete_account"})
+
+# Logical order for several requests: reads, then money movement, then deletion.
+# Ties keep the written order. `none` goes last so a real action runs first.
+ACTION_PRECEDENCE: dict[str, int] = {
+    "view_public_faq": 0,
+    "view_account_balance": 0,
+    "wire_transfer_funds": 1,
+    "delete_account": 2,
+}
 
 ACTION_CATALOG: dict[str, str] = {
     "wire_transfer_funds": (
@@ -113,6 +123,7 @@ class Decision:
     suggestion: str | None = None
     source: Literal["jev", "minilm"] = "minilm"
     description_match: DescriptionMatch | None = None
+    follow_ups: tuple[str, ...] = ()
 
 
 def parse_request(
@@ -626,6 +637,113 @@ def decide(
     return _decision("execute", policy_reason)
 
 
+RequestCounter = Callable[[str], str | None]
+Splitter = Callable[[str], tuple[str, ...]]
+
+
+def count_requests_with_jev(utterance: str) -> str | None:
+    """Jev's count of distinct requests: none, one, or several. None means unknown."""
+    _load_env()
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        return None
+    try:
+        from typesafe_sdk import Choice, TypeSafeClient
+
+        with TypeSafeClient() as client:
+            response = client.system_one(
+                state=utterance,
+                questions={
+                    "request_count": Choice(
+                        instructions=(
+                            "How many distinct things does the user ask the system to do? "
+                            "A mention of a future action that is only context does not count as a request."
+                        ),
+                        criteria={
+                            "none": "The text asks the system to do nothing",
+                            "one": "The text asks the system to do exactly one thing",
+                            "several": "The text asks the system to do two or more different things",
+                        },
+                    ),
+                },
+            )
+        answer = response.answers["request_count"]
+        if float(answer.confidence) < JEV_MIN_CONFIDENCE:
+            return None
+        return str(answer.choice)
+    except Exception:
+        print("Jev request count unavailable; routing as one request.", flush=True)
+        return None
+
+
+def route(
+    utterance: str,
+    session: Session,
+    ledger: Ledger,
+    *,
+    request_counter: RequestCounter = count_requests_with_jev,
+    splitter: Splitter = split_requests,
+    **decide_kwargs,
+) -> Decision:
+    """Several requests: split, order logically, decide the first, ask about the rest.
+
+    One request, or an unknown count, is today's `decide()` unchanged. A denied
+    first request offers no follow-ups. This never mutates the ledger.
+    """
+    if request_counter(utterance) != "several":
+        return decide(utterance, session, ledger, **decide_kwargs)
+
+    try:
+        clauses = splitter(utterance)
+    except Exception:
+        clauses = ()
+    if len(clauses) < 2:
+        return Decision(
+            action=NONE_ACTION,
+            outcome="deny",
+            reason="several requests could not be separated",
+            parsed=parse_request(utterance, session.payee_allowlist),
+            scores={},
+            permissions={},
+            rule_trace=["request_count=several", f"split_count={len(clauses)}"],
+        )
+
+    # Label every clause only to order them. Policy runs on the first one alone.
+    jev_min_confidence = decide_kwargs.get("jev_min_confidence", JEV_MIN_CONFIDENCE)
+    ranks = [
+        _select_rank(
+            clause,
+            intent_ranker=decide_kwargs.get("intent_ranker"),
+            query_vector=None,
+            action_embeddings=None,
+            embedder=decide_kwargs.get("embedder"),
+        )
+        for clause in clauses
+    ]
+    labels = [
+        NONE_ACTION if rank.source == "jev" and rank.confidence < jev_min_confidence else rank.action
+        for rank in ranks
+    ]
+    ordered = sorted(
+        range(len(clauses)),
+        key=lambda i: ACTION_PRECEDENCE.get(labels[i], len(ACTION_PRECEDENCE)),
+    )
+    head = ordered[0]
+    # Reuse the head's rank so the decided action is the one that was ordered.
+    first = decide(
+        clauses[head],
+        session,
+        ledger,
+        **{**decide_kwargs, "intent_ranker": lambda _clause: ranks[head]},
+    )
+    trace = [
+        "request_count=several",
+        *(f"split[{i}]={clauses[i]!r} label={labels[i]}" for i in range(len(clauses))),
+        f"logical_order={[labels[i] for i in ordered]}",
+    ]
+    follow_ups = () if first.outcome == "deny" else tuple(clauses[i] for i in ordered[1:])
+    return replace(first, rule_trace=trace + first.rule_trace, follow_ups=follow_ups)
+
+
 def print_decision(utterance: str, session: Session, decision: Decision) -> None:
     print(f"\nUser Query: '{utterance}'")
     print(
@@ -679,6 +797,10 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
                 f"MiniLM nearest={match.nearest} ({match.nearest_cosine:.4f}); "
                 f"Jev action cosine={match.chosen_cosine:.4f}"
             )
+    if decision.follow_ups:
+        print("You also asked (ask again to proceed):")
+        for follow_up in decision.follow_ups:
+            print(f"  - {follow_up}")
     if decision.suggestion:
         print(f"Suggestion: {decision.suggestion}")
     print()
@@ -726,7 +848,7 @@ if __name__ == "__main__":
 
     for key in ("guest", "zero", "funded"):
         session = sessions[key]
-        decision = decide(utterance, session, ledger, embedder=embedder)
+        decision = route(utterance, session, ledger, embedder=embedder)
         balance = ledger.get_balance(session.account_id)
         print(f"\n--- Session '{key}' (balance=${balance}) ---")
         print_decision(utterance, session, decision)

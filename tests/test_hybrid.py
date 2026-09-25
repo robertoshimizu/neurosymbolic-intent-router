@@ -17,6 +17,7 @@ from hybrid import (
     decide,
     evaluate_action,
     parse_request,
+    route,
 )
 from transfer import Ledger, WireTransfer, confirm_or_refuse
 
@@ -406,3 +407,87 @@ def test_live_jev_abstains_on_unrelated_sentence() -> None:
     assert decision.source == "jev"
     assert decision.reason == "no matching action"
     assert decision.outcome == "deny"
+
+
+CLOSE_AND_WIRE = "Close this account and send $500 to my external bank account."
+CLOSE = "Close this account."
+WIRE_500 = "Send $500 to my external bank account."
+
+
+def _keyword_rank(clause: str) -> IntentRank:
+    lower = clause.lower()
+    if "close" in lower:
+        return _jev_rank("delete_account", 0.95)
+    if "send" in lower:
+        return _jev_rank("wire_transfer_funds", 0.95)
+    if "balance" in lower:
+        return _jev_rank("view_account_balance", 0.95)
+    return _jev_rank("none", 0.95)
+
+
+def _route(utterance: str, session: Session, ledger: Ledger, *, count: str | None, split) -> Decision:
+    return route(
+        utterance,
+        session,
+        ledger,
+        request_counter=lambda _u: count,
+        splitter=split,
+        intent_ranker=_keyword_rank,
+    )
+
+
+def _no_split(_utterance: str) -> tuple[str, ...]:
+    raise AssertionError("splitter must not run")
+
+
+def test_route_orders_money_movement_before_deletion() -> None:
+    ledger = _ledger(Decimal("10000"))
+    decision = _route(
+        CLOSE_AND_WIRE, _session("admin", role="admin"), ledger,
+        count="several", split=lambda _u: (CLOSE, WIRE_500),
+    )
+    assert decision.action == "wire_transfer_funds"
+    assert decision.outcome == "needs_confirmation"
+    assert decision.follow_ups == (CLOSE,)
+    assert ledger.get_balance("acct") == Decimal("10000")
+
+
+def test_route_denied_first_request_offers_no_follow_ups() -> None:
+    decision = _route(
+        CLOSE_AND_WIRE, _session("admin", role="admin"), _ledger(Decimal("0")),
+        count="several", split=lambda _u: (CLOSE, WIRE_500),
+    )
+    assert decision.action == "wire_transfer_funds"
+    assert decision.outcome == "deny"
+    assert decision.follow_ups == ()
+
+
+def test_route_read_runs_before_wire() -> None:
+    decision = _route(
+        "Wire $500 to my external bank account and show my balance.",
+        _session("funded"), _ledger(Decimal("10000")),
+        count="several", split=lambda _u: (WIRE_500, "Show my balance."),
+    )
+    assert decision.action == "view_account_balance"
+    assert decision.outcome == "execute"
+    assert decision.follow_ups == (WIRE_500,)
+
+
+def test_route_one_request_skips_splitter() -> None:
+    decision = _route(WIRE_UTTERANCE, _session("funded"), _ledger(Decimal("10000")), count="one", split=_no_split)
+    assert decision.action == "wire_transfer_funds"
+    assert decision.follow_ups == ()
+
+
+def test_route_unknown_count_skips_splitter() -> None:
+    decision = _route(WIRE_UTTERANCE, _session("funded"), _ledger(Decimal("10000")), count=None, split=_no_split)
+    assert decision.outcome == "needs_confirmation"
+
+
+def test_route_failed_split_denies_without_guessing() -> None:
+    def _down(_utterance: str) -> tuple[str, ...]:
+        raise RuntimeError("Ollama request failed")
+
+    decision = _route(CLOSE_AND_WIRE, _session("funded"), _ledger(Decimal("10000")), count="several", split=_down)
+    assert decision.outcome == "deny"
+    assert decision.reason == "several requests could not be separated"

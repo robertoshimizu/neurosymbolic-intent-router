@@ -51,16 +51,46 @@ def read_sentence(
     timeout_s: float = 180,
 ) -> Reading:
     """One user message, thinking off, matching `ollama run --think=false`."""
-    body = json.dumps(
-        {
-            "model": model,
-            "stream": False,
-            "think": False,
-            "format": "json",
-            "messages": [{"role": "user", "content": prompt_for(text)}],
-            "options": {"temperature": 0},
-        }
-    ).encode()
+    content = _chat(prompt_for(text), model=model, endpoint=endpoint, timeout_s=timeout_s, as_json=True)
+    return Reading(raw=parse_model_json(content))
+
+
+SPLIT_INSTRUCTIONS = """Rewrite the text below as the separate things it asks the system to do. Write each request as one short, self-contained imperative sentence on its own line, using the text's own words. Keep amounts, currencies, accounts, and destinations exactly as written, and do not add any that are not written. Leave out things the text says not to do, background, and future actions that are mentioned only as context. Do not answer, merge, reorder, or add requests. If the text asks for exactly one thing, return exactly one line. Return only the lines, with no numbering, bullets, or other text. TEXT: """
+
+
+def parse_split(text: str) -> tuple[str, ...]:
+    return tuple(line.strip() for line in text.splitlines() if line.strip())
+
+
+def split_requests(
+    text: str,
+    *,
+    model: str = "medgemma:27b",
+    endpoint: str = "http://127.0.0.1:11434/api/chat",
+    timeout_s: float = 180,
+) -> tuple[str, ...]:
+    """Separate plain requests, in the order written. The router orders them, not the model."""
+    content = _chat(
+        f"{SPLIT_INSTRUCTIONS}{text.strip()}",
+        model=model,
+        endpoint=endpoint,
+        timeout_s=timeout_s,
+        as_json=False,
+    )
+    return parse_split(content)
+
+
+def _chat(content: str, *, model: str, endpoint: str, timeout_s: float, as_json: bool) -> str:
+    payload: dict = {
+        "model": model,
+        "stream": False,
+        "think": False,
+        "messages": [{"role": "user", "content": content}],
+        "options": {"temperature": 0},
+    }
+    if as_json:
+        payload["format"] = "json"
+    body = json.dumps(payload).encode()
     request = urllib.request.Request(
         endpoint,
         data=body,
@@ -71,5 +101,4 @@ def read_sentence(
             envelope = json.loads(response.read().decode())
     except urllib.error.URLError as exc:
         raise RuntimeError("Ollama request failed") from exc
-    content = envelope.get("message", {}).get("content", "")
-    return Reading(raw=parse_model_json(content))
+    return envelope.get("message", {}).get("content", "")

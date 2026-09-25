@@ -6,7 +6,13 @@ import json
 
 import pytest
 
-from intent_understanding import parse_model_json, prompt_for, read_sentence
+from intent_understanding import (
+    parse_model_json,
+    parse_split,
+    prompt_for,
+    read_sentence,
+    split_requests,
+)
 
 SUPPLIER = (
     "The supplier stopped shipping shortly after Banco X withdrew the credit line. "
@@ -169,3 +175,39 @@ def test_medgemma_reads_sentence(sentence: str) -> None:
     print(json.dumps(reading.raw, indent=2, ensure_ascii=False))
     assert isinstance(reading.raw, dict)
     assert_action_reading(sentence, reading.raw)
+
+
+def test_parse_split_keeps_one_request_per_nonblank_line() -> None:
+    raw = "\n  Send the remaining cash to my external bank account.\n\nClose this account.  \n"
+    assert parse_split(raw) == (
+        "Send the remaining cash to my external bank account.",
+        "Close this account.",
+    )
+
+
+# sentence -> words each split line must contain, in the order written.
+SPLIT_CASES: dict[str, tuple[tuple[str, ...], ...]] = {
+    SENTENCES[3]: (("close", "account"), ("send", "remaining cash", "external bank account")),
+    "Show my balance and then wire $500 to my external bank account.": (
+        ("balance",),
+        ("wire", "$500", "external bank account"),
+    ),
+    "I want to send $5,000 to my external bank account.": (
+        ("send", "$5,000", "external bank account"),
+    ),
+    "Don't close my account, just show me my balance.": (("balance",),),
+}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("sentence", SPLIT_CASES)
+def test_medgemma_splits_requests(sentence: str) -> None:
+    lines = split_requests(sentence)
+    print(f"\nSENTENCE: {sentence}")
+    for line in lines:
+        print(f"  - {line}")
+    expected = SPLIT_CASES[sentence]
+    assert len(lines) == len(expected)
+    for line, words in zip(lines, expected):
+        assert all(word in line.lower() for word in words)
+    assert not any("close" in line.lower() for line in lines if "don't" in sentence.lower())
