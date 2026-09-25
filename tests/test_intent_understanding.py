@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from intent_understanding import SECTIONS, parse_model_json, prompt_for, read_sentence
+from intent_understanding import parse_model_json, prompt_for, read_sentence
 
 SUPPLIER = (
     "The supplier stopped shipping shortly after Banco X withdrew the credit line. "
@@ -114,6 +114,51 @@ def test_parser_keeps_items_without_a_statement_field() -> None:
     assert payload["relationships"][0]["target"] == "UNKNOWN"
 
 
+def _raw_text(value: object) -> str:
+    """Flatten model JSON for flexible-field semantic smoke checks."""
+    if isinstance(value, dict):
+        return " ".join(f"{key} {_raw_text(item)}" for key, item in value.items())
+    if isinstance(value, list):
+        return " ".join(_raw_text(item) for item in value)
+    return str(value)
+
+
+def _section_items(raw: dict, fragment: str) -> list:
+    return [
+        value
+        for key, value in raw.items()
+        if fragment in key.lower().replace("_", " ") and isinstance(value, list)
+    ]
+
+
+def assert_action_reading(sentence: str, raw: dict) -> None:
+    text = _raw_text(raw).lower()
+    if sentence == SENTENCES[0]:
+        assert all(word in text for word in ("nurse", "patient"))
+        assert "after" in text or "before" in text
+        assert not any(_section_items(raw, "causal"))
+    elif sentence == SENTENCES[1]:
+        assert all(word in text for word in ("she", "train", "late"))
+        assert any(_section_items(raw, "causal"))
+    elif sentence == SENTENCES[2]:
+        assert all(word in text for word in ("question", "prospective", "before"))
+        assert "unknown" in text
+    elif sentence == SENTENCES[3]:
+        assert all(word in text for word in ("close", "send", "cash", "external bank"))
+        assert "prospective" in text or "request" in text
+    elif sentence == SENTENCES[4]:
+        assert all(word in text for word in ("portugal", "capital", "question", "unknown"))
+        assert "lisbon" not in text
+    elif sentence == SUPPLIER:
+        assert all(
+            word in text
+            for word in ("supplier", "banco x", "credit line", "shipping", "production", "subsidiary")
+        )
+        assert "shortly" in text or "after" in text
+        assert "subsequently" in text or "after" in text
+        assert not any(_section_items(raw, "causal"))
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize("sentence", SENTENCES)
 def test_medgemma_reads_sentence(sentence: str) -> None:
@@ -123,4 +168,4 @@ def test_medgemma_reads_sentence(sentence: str) -> None:
     print(json.dumps(REVIEW_CRITERIA[sentence], indent=2, ensure_ascii=False))
     print(json.dumps(reading.raw, indent=2, ensure_ascii=False))
     assert isinstance(reading.raw, dict)
-    assert any(isinstance(reading.raw.get(name), list) for name in SECTIONS)
+    assert_action_reading(sentence, reading.raw)
