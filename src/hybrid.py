@@ -74,6 +74,28 @@ class Session:
 
 
 @dataclass(frozen=True)
+class DescriptionMatch:
+    """MiniLM closeness of the utterance to the action descriptions.
+
+    Jev still chooses the action. This only explains that choice.
+    """
+
+    chosen: str
+    nearest: str
+    nearest_cosine: float
+    chosen_cosine: float
+    similarities: dict[str, float]
+
+    @property
+    def agrees(self) -> bool:
+        return self.nearest == self.chosen
+
+    @property
+    def description_gap(self) -> bool:
+        return (not self.agrees) or self.chosen_cosine < MIN_SCORE
+
+
+@dataclass(frozen=True)
 class ParsedRequest:
     amount: Decimal | None
     payee: str | None
@@ -90,6 +112,7 @@ class Decision:
     rule_trace: list[str] = field(default_factory=list)
     suggestion: str | None = None
     source: Literal["jev", "minilm"] = "minilm"
+    description_match: DescriptionMatch | None = None
 
 
 def parse_request(
@@ -426,6 +449,32 @@ def _select_rank(
     return rank if rank is not None else minilm()
 
 
+def _explain_with_minilm(
+    utterance: str,
+    chosen_action: str,
+    *,
+    intent_ranker: IntentRanker | None,
+    query_vector: np.ndarray | None,
+    action_embeddings: dict[str, np.ndarray] | None,
+    embedder: ActionEmbedder | None,
+) -> DescriptionMatch | None:
+    """Cosines for a committed Jev label. Fake rankers skip the model unless vectors are injected."""
+    injected = query_vector is not None and action_embeddings is not None
+    if injected:
+        similarity = _rank_minilm(query_vector, action_embeddings)
+    elif intent_ranker is None:
+        similarity = _rank_minilm_from_text(utterance, embedder)
+    else:
+        return None
+    return DescriptionMatch(
+        chosen=chosen_action,
+        nearest=similarity.action,
+        nearest_cosine=similarity.confidence,
+        chosen_cosine=float(similarity.scores.get(chosen_action, 0.0)),
+        similarities=similarity.scores,
+    )
+
+
 def decide(
     utterance: str,
     session: Session,
@@ -473,6 +522,21 @@ def decide(
         )
 
     top_action = rank.action
+    description_match = None
+    if (
+        rank.source == "jev"
+        and top_action in ACTION_CATALOG
+        and rank.confidence >= jev_min_confidence
+    ):
+        description_match = _explain_with_minilm(
+            utterance,
+            top_action,
+            intent_ranker=intent_ranker,
+            query_vector=query_vector,
+            action_embeddings=action_embeddings,
+            embedder=embedder,
+        )
+
     catalog_actions = [action for action in scores if action in ACTION_CATALOG]
     if top_action not in ACTION_CATALOG:
         catalog_actions = list(ACTION_CATALOG)
@@ -490,6 +554,20 @@ def decide(
         f"parsed_payee={parsed.payee}",
         f"policy[{top_action}]={policy_reason}",
     ]
+    if description_match is not None:
+        rule_trace.append(
+            f"minilm_nearest={description_match.nearest} "
+            f"cosine={description_match.nearest_cosine:.4f}"
+        )
+        rule_trace.append(
+            f"minilm_chosen_cosine={description_match.chosen_cosine:.4f}"
+        )
+        if description_match.agrees and not description_match.description_gap:
+            rule_trace.append("minilm_agrees=yes")
+        elif not description_match.agrees:
+            rule_trace.append("description_gap=nearest_differs")
+        else:
+            rule_trace.append("description_gap=chosen_cosine_below_min_score")
 
     def _decision(
         outcome: Outcome,
@@ -508,6 +586,7 @@ def decide(
             rule_trace=rule_trace if not trace_extra else rule_trace + trace_extra,
             suggestion=suggestion,
             source=rank.source,
+            description_match=description_match,
         )
 
     if not permissions.get(top_action, False):
@@ -554,12 +633,20 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
         f"Status='{session.status}', Account='{session.account_id}'"
     )
     score_label = "Jev Probability" if decision.source == "jev" else "Raw Similarity"
+    show_similarity = decision.description_match is not None
     print(f"\nRanker: {decision.source}")
     print("\nAction Decision Matrix:")
-    print(
-        f"{'Candidate Action':<24} | {score_label:<15} | {'Allowed?':<8}"
-    )
-    print("-" * 55)
+    if show_similarity:
+        print(
+            f"{'Candidate Action':<24} | {'Jev Probability':<16} | "
+            f"{'Raw Similarity':<15} | {'Allowed?':<8}"
+        )
+        print("-" * 74)
+    else:
+        print(
+            f"{'Candidate Action':<24} | {score_label:<16} | {'Allowed?':<8}"
+        )
+        print("-" * 56)
     for act, score in sorted(
         decision.scores.items(), key=lambda item: item[1], reverse=True
     ):
@@ -567,12 +654,31 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
             allowed_str = "—"
         else:
             allowed_str = "YES" if decision.permissions.get(act, False) else "NO"
-        print(f"{act:<24} | {score:<15.4f} | {allowed_str:<8}")
+        if show_similarity:
+            cosine = decision.description_match.similarities.get(act)
+            cosine_str = f"{cosine:.4f}" if cosine is not None else "—"
+            print(
+                f"{act:<24} | {score:<16.4f} | {cosine_str:<15} | {allowed_str:<8}"
+            )
+        else:
+            print(f"{act:<24} | {score:<16.4f} | {allowed_str:<8}")
 
     print(
         f"\nDecision: action={decision.action} outcome={decision.outcome} "
         f"reason={decision.reason}"
     )
+    if decision.description_match is not None:
+        match = decision.description_match
+        if match.agrees and not match.description_gap:
+            print(
+                f"MiniLM agrees: {match.nearest} cosine={match.chosen_cosine:.4f}"
+            )
+        else:
+            print(
+                "Description gap: "
+                f"MiniLM nearest={match.nearest} ({match.nearest_cosine:.4f}); "
+                f"Jev action cosine={match.chosen_cosine:.4f}"
+            )
     if decision.suggestion:
         print(f"Suggestion: {decision.suggestion}")
     print()

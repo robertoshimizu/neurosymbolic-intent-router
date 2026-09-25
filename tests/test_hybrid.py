@@ -327,6 +327,44 @@ def test_jev_wire_still_needs_confirmation() -> None:
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "needs_confirmation"
     assert decision.source == "jev"
+    assert decision.description_match is None
+
+
+def test_minilm_explains_when_it_agrees_with_jev() -> None:
+    decision = decide(
+        WIRE_UTTERANCE,
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        query_vector=WIRE_QUERY,
+        action_embeddings=_orthonormal_catalog(),
+        intent_ranker=lambda _utterance: _jev_rank("wire_transfer_funds", 0.86),
+    )
+    assert decision.action == "wire_transfer_funds"
+    assert decision.outcome == "needs_confirmation"
+    match = decision.description_match
+    assert match is not None
+    assert match.agrees
+    assert match.nearest == "wire_transfer_funds"
+    assert "minilm_agrees=yes" in decision.rule_trace
+
+
+def test_minilm_disagreement_does_not_override_jev() -> None:
+    faq_query = np.array([0.02, 0.05, 0.10, 0.98])
+    decision = decide(
+        WIRE_UTTERANCE,
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        query_vector=faq_query,
+        action_embeddings=_orthonormal_catalog(),
+        intent_ranker=lambda _utterance: _jev_rank("wire_transfer_funds", 0.86),
+    )
+    assert decision.action == "wire_transfer_funds"
+    assert decision.outcome == "needs_confirmation"
+    match = decision.description_match
+    assert match is not None
+    assert not match.agrees
+    assert match.nearest == "view_public_faq"
+    assert "description_gap=nearest_differs" in decision.rule_trace
 
 
 def test_jev_failure_falls_back_to_minilm() -> None:
@@ -341,6 +379,19 @@ def test_jev_failure_falls_back_to_minilm() -> None:
     assert decision.source == "minilm"
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "needs_confirmation"
+
+
+def test_jev_abstain_skips_minilm_explanation() -> None:
+    decision = decide(
+        "What is the capital of Portugal?",
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        query_vector=WIRE_QUERY,
+        action_embeddings=_orthonormal_catalog(),
+        intent_ranker=lambda _utterance: _jev_rank("none", 0.91),
+    )
+    assert decision.reason == "no matching action"
+    assert decision.description_match is None
 
 
 @pytest.mark.integration
