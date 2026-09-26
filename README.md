@@ -136,7 +136,7 @@ The **Allowed?** column is the symbolic side at work. The model scores are ident
 | view_public_faq | YES | YES | YES |
 | delete_account | NO | NO | NO |
 
-The rules behind these outcomes, from `src/policy.pl`. For each request `R`, the Python adapter asserts facts such as `authenticated(R)`, `amount(R, 500)` and `balance(R, 10000)`; a value the request lacks is simply not asserted:
+The rules behind these outcomes, from `src/adapters/policy.pl`. For each request `R`, the Python adapter asserts facts such as `authenticated(R)`, `amount(R, 500)` and `balance(R, 10000)`; a value the request lacks is simply not asserted:
 
 ```prolog
 %   Handling order for several requests: reads, then money movement, then deletion.
@@ -195,10 +195,10 @@ The router depends only on roles defined in `src/contracts.py`. `src/demo.py` ch
 
 | Role | Job | Today |
 |---|---|---|
-| Classifier, Labeler | Intent and request count; a label for each split request | Jev (`jev.py`) |
-| Splitter | The separate requests, as written | MedGemma on Ollama (`intent_understanding.py`) |
-| Explainer | Closeness to each action description, display only | MiniLM (`minilm.py`) |
-| Policy | Order of requests; allow or deny with every reason; suggestion | Prolog (`prolog_policy.py`, `policy.pl`) or Python (`python_policy.py`) |
+| Classifier, Labeler | Intent and request count; a label for each split request | Jev (`adapters/jev.py`) |
+| Splitter | The separate requests, as written | MedGemma on Ollama (`adapters/medgemma.py`) |
+| Explainer | Closeness to each action description, display only | MiniLM (`adapters/minilm.py`) |
+| Policy | Order of requests; allow or deny with every reason; suggestion | Prolog (`adapters/prolog_policy.py`, `adapters/policy.pl`) or Python (`adapters/python_policy.py`) |
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -208,11 +208,12 @@ The router depends only on roles defined in `src/contracts.py`. `src/demo.py` ch
 └────┬────────────────┬────────────────┬────────────────┬────────────────┬─┘
      │ builds         │ builds         │ builds         │ builds         │
      ▼                ▼                ▼                ▼                │
+  src/adapters/                                                          │
 ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌───────────────┐     │
-│ jev.py       │ │ minilm.py    │ │ intent_under │ │ prolog_policy │     │
-│ JevClassifier│ │ MiniLM-      │ │ standing.py  │ │ .py + .pl     │     │
-│              │ │ Explainer    │ │ MedGemma-    │ │ python_policy │     │
-│              │ │              │ │ Splitter     │ │ .py           │     │
+│ jev.py       │ │ minilm.py    │ │ medgemma.py  │ │ prolog_policy │     │
+│ JevClassifier│ │ MiniLM-      │ │ MedGemma-    │ │ .py + .pl     │     │
+│              │ │ Explainer    │ │ Splitter     │ │ python_policy │     │
+│              │ │              │ │              │ │ .py           │     │
 └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └───────┬───────┘     │
        │ implements     │ implements     │ implements      │ implements  │
        │ Classifier,    │ Explainer      │ Splitter        │ Policy      │
@@ -260,7 +261,7 @@ What each test checks: [tests/README.md](tests/README.md).
 
 ## Experiments
 
-- [Structured output from local models](docs/structured-output-experiment.md): native Ollama `format=<schema>` against Instructor, on MedGemma and Qwen.
+Isolated experiments that `src/` does not use: [experiments/README.md](experiments/README.md).
 
 ## Status
 

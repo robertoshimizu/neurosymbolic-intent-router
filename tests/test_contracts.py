@@ -17,11 +17,11 @@ import pytest
 import typesafe_sdk
 from typesafe_sdk import ChoiceAnswer
 
-import intent_understanding
+from adapters import medgemma
 from contracts import Classifier, Explainer, IntentRank, Labeler, RequestCount, Splitter
-from intent_understanding import MedGemmaSplitter
-from jev import JevClassifier
-from minilm import ActionEmbedder, MiniLMExplainer
+from adapters.medgemma import MedGemmaSplitter
+from adapters.jev import JevClassifier
+from adapters.minilm import ActionEmbedder, MiniLMExplainer
 from policy import ACTION_CATALOG, NONE_ACTION
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,7 +169,7 @@ def test_splitter_keeps_written_order_and_uses_its_settings(monkeypatch: pytest.
         calls.append((model, endpoint))
         return "Close this account.\n\nSend $500 to my external bank account.\n"
 
-    monkeypatch.setattr(intent_understanding, "_chat", _fake_chat)
+    monkeypatch.setattr(medgemma, "_chat", _fake_chat)
     splitter: Splitter = MedGemmaSplitter(model="other-model", endpoint="http://example.invalid/api/chat")
     assert splitter.split("Close this account and send $500 to my external bank account.") == (
         "Close this account.",

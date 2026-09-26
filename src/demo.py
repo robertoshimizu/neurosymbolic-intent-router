@@ -8,12 +8,12 @@ from __future__ import annotations
 import argparse
 from decimal import Decimal
 
-from intent_understanding import MedGemmaSplitter
-from jev import JevClassifier
-from minilm import MiniLMExplainer
+from adapters.medgemma import MedGemmaSplitter
+from adapters.jev import JevClassifier
+from adapters.minilm import MiniLMExplainer
 from contracts import Policy
 from policy import Session
-from python_policy import PythonPolicy
+from adapters.python_policy import PythonPolicy
 from router import Decision
 from transfer import Ledger
 from workflow import RequestWorkflow
@@ -23,7 +23,7 @@ def build_policy(name: str) -> Policy:
     """The only place that knows which reasoner judges actions."""
     if name == "python":
         return PythonPolicy()
-    from prolog_policy import PrologPolicy  # needs SWI-Prolog; imported only when chosen
+    from adapters.prolog_policy import PrologPolicy  # needs SWI-Prolog; imported only when chosen
 
     return PrologPolicy()
 

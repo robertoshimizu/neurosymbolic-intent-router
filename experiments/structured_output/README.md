@@ -1,10 +1,10 @@
 # Experiment: structured output from local models
 
-*Run on 2026-09-26. Isolated in `tests/test_structured_output.py`; nothing in `src/` uses it.*
+*Run on 2026-09-26. Isolated in `experiments/structured_output/test_structured_output.py`; nothing in `src/` uses it.*
 
 **The question.** LLMs sometimes return the wrong type. Should the project validate model output at runtime with pydantic, or force JSON with a library such as Instructor, Outlines, Guidance or PydanticAI?
 
-**What was decided for the main program.** Validation happens once, where model output becomes an `IntentRank`, with a plain dataclass check (see [Architecture](../README.md#architecture)). Pydantic is not a direct dependency of the contracts: there are five fields, and the catalog check needs custom code either way. The Jev SDK already validates its responses with pydantic. MedGemma's split output is plain text, which a schema cannot check for meaning.
+**What was decided for the main program.** Validation happens once, where model output becomes an `IntentRank`, with a plain dataclass check (see [Architecture](../../README.md#architecture)). Pydantic is not a direct dependency of the contracts: there are five fields, and the catalog check needs custom code either way. The Jev SDK already validates its responses with pydantic. MedGemma's split output is plain text, which a schema cannot check for meaning.
 
 **The three ways to get structured output.**
 - **Validate afterwards and retry** (Instructor, Marvin, PydanticAI). The model writes freely, the output is checked, and on failure the model is asked again. This costs another model call per retry.
@@ -38,6 +38,6 @@ Every answer in every run had a valid shape, and Instructor never retried. The f
 **Limits.** One run per model, 11 fairly clear sentences. This shows that the format is reliable, not that accuracy holds on mixed or tricky sentences or from one run to the next.
 
 ```bash
-uv run pytest tests/test_structured_output.py -m ollama -s
-OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_output.py -m ollama -s
+uv run pytest experiments/structured_output/test_structured_output.py -m ollama -s
+OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest experiments/structured_output/test_structured_output.py -m ollama -s
 ```

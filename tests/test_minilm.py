@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from minilm import ActionEmbedder, MiniLMExplainer
+from adapters.minilm import ActionEmbedder, MiniLMExplainer
 
 
 @pytest.mark.integration

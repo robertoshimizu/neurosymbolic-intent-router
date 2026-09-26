@@ -12,10 +12,10 @@ import numpy as np
 import pytest
 
 from contracts import Classifier, DescriptionMatch, Explainer, IntentRank, Labeler, RequestCount, Splitter
-from jev import JevClassifier
-from minilm import ActionEmbedder, MiniLMExplainer
+from adapters.jev import JevClassifier
+from adapters.minilm import ActionEmbedder, MiniLMExplainer
 from policy import ACTION_CATALOG
-from python_policy import PythonPolicy
+from adapters.python_policy import PythonPolicy
 from router import Decision, decide, route
 from policy import Session
 from transfer import Ledger, WireTransfer, authorize_or_refuse

@@ -13,7 +13,7 @@ from contracts import Classifier, IntentRank, Labeler, RequestCount
 from policy import ACTION_CATALOG, NONE_ACTION
 
 # TYPESAFE_API_KEY comes from the project .env, never from code.
-load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 
 # Jev confidence is a probability, not a cosine. Docs treat values under 0.5 as unsure.
 MIN_CONFIDENCE = 0.5

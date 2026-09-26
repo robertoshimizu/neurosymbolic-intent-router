@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from contracts import Classifier, IntentRank
 from policy import Session
-from python_policy import PythonPolicy
+from adapters.python_policy import PythonPolicy
 from transfer import Ledger
 from workflow import RequestWorkflow
 

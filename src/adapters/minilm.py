@@ -15,15 +15,15 @@ if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
 
 # HF_TOKEN for Hub downloads comes from the project .env, never from code.
-load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 # Hub download cache (safetensors live here after the first fetch).
 MODEL_CACHE_DIR = Path(__file__).resolve(
-).parents[1] / ".cache" / "sentence-transformers"
+).parents[2] / ".cache" / "sentence-transformers"
 # Persistent embedding vectors so CLI runs can skip loading weights into RAM.
 EMBEDDING_CACHE_DIR = Path(__file__).resolve(
-).parents[1] / ".cache" / "embeddings"
+).parents[2] / ".cache" / "embeddings"
 _MODEL_CACHE: dict[str, SentenceTransformer] = {}
 # A chosen action below this cosine is shown as a description gap.
 MIN_SCORE = 0.45

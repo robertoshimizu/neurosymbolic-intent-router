@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from intent_understanding import parse_split, split_requests
+from adapters.medgemma import parse_split, split_requests
 
 
 def test_parse_split_keeps_one_request_per_nonblank_line() -> None:

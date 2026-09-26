@@ -56,10 +56,7 @@
 | `test_policy_engines.py` | | |
 | prolog_policy_agrees_with_python_policy | Prolog returns the same verdict, reasons in order, and suggestion as Python on 1,728 cases | integration (prolog) |
 | prolog_policy_orders_requests_like_python_policy | Prolog orders all 252 sequences of 2 or 3 labels as Python does, ties included | integration (prolog) |
-| `test_structured_output.py` | | |
-| classify_returns_a_catalog_action (native, instructor) | A local Ollama model returns one catalog action in a valid shape; accuracy printed | integration (ollama) |
-| split_returns_a_list_of_requests (native, instructor) | A local Ollama model returns a list of requests in a valid shape; accuracy printed | integration (ollama) |
-| `test_intent_understanding.py` | | |
+| `test_medgemma.py` | | |
 | parse_split_keeps_one_request_per_nonblank_line | The split parser keeps one request per line | unit |
 | medgemma_splits_requests (4 sentences) | MedGemma splits in the user's words | integration |
 

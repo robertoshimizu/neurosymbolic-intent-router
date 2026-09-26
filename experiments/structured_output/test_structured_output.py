@@ -8,8 +8,8 @@ Two approaches, same schemas, same sentences:
 Only the shape is asserted. Accuracy, retries and time are printed, because
 they vary between runs. Nothing in src/ uses this file.
 
-    uv run pytest tests/test_structured_output.py -m ollama -s
-    OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_output.py -m ollama -s
+    uv run pytest experiments/structured_output/test_structured_output.py -m ollama -s
+    OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest experiments/structured_output/test_structured_output.py -m ollama -s
 """
 
 from __future__ import annotations
@@ -29,7 +29,23 @@ from openai import OpenAI
 from pydantic import BaseModel, Field, JsonValue, ValidationError, field_validator
 
 from policy import ACTION_CATALOG, NONE_ACTION
-from test_intent_understanding import SPLIT_CASES
+
+# Copied from tests/test_medgemma.py so this experiment does not depend on tests/.
+# sentence -> words each split line must contain, in the order written.
+SPLIT_CASES: dict[str, tuple[tuple[str, ...], ...]] = {
+    "Close this account and send the remaining cash to my external bank account.": (
+        ("close", "account"),
+        ("send", "remaining cash", "external bank account"),
+    ),
+    "Show my balance and then wire $500 to my external bank account.": (
+        ("balance",),
+        ("wire", "$500", "external bank account"),
+    ),
+    "I want to send $5,000 to my external bank account.": (
+        ("send", "$5,000", "external bank account"),
+    ),
+    "Don't close my account, just show me my balance.": (("balance",),),
+}
 
 pytestmark = [pytest.mark.integration, pytest.mark.ollama]
 

@@ -12,7 +12,7 @@ import pytest
 
 from contracts import Policy
 from policy import ACTION_CATALOG, NONE_ACTION, ParsedRequest, Session
-from python_policy import PythonPolicy
+from adapters.python_policy import PythonPolicy
 
 ACTIONS = (*ACTION_CATALOG, NONE_ACTION, "bogus_action")
 AMOUNTS = (None, Decimal("0"), Decimal("-1"), Decimal("500"), Decimal("500.10"), Decimal("20000"))
@@ -37,7 +37,7 @@ def _cases() -> list[tuple[str, Session, Decimal, ParsedRequest]]:
 
 @pytest.fixture(scope="module")
 def prolog_policy() -> Policy:
-    from prolog_policy import PrologPolicy  # needs SWI-Prolog; imported only by this test
+    from adapters.prolog_policy import PrologPolicy  # needs SWI-Prolog; imported only by this test
 
     return PrologPolicy()
 

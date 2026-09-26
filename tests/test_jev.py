@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typesafe_sdk import ChoiceAnswer
 
-from jev import JevClassifier
+from adapters.jev import JevClassifier
 
 
 def _answer(choice: str, confidence: float) -> ChoiceAnswer:
