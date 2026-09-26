@@ -55,7 +55,11 @@ class JevClassifier(Classifier, Labeler):
         request_count: RequestCount | None = None
         if float(count.confidence) >= self.min_confidence and choice in ("none", "one", "several"):
             request_count = choice
-        return replace(self._to_rank(response["action"]), request_count=request_count)
+        try:
+            return replace(self._to_rank(response["action"]), request_count=request_count)
+        except ValueError as exc:
+            print(f"Jev answer rejected: {exc}", flush=True)
+            return None
 
     def label(self, texts: tuple[str, ...]) -> list[IntentRank] | None:
         """One call, one catalog question per text. None means unavailable."""
@@ -73,7 +77,11 @@ class JevClassifier(Classifier, Labeler):
         )
         if response is None:
             return None
-        return [self._to_rank(response[f"request_{i}"]) for i in range(1, len(texts) + 1)]
+        try:
+            return [self._to_rank(response[f"request_{i}"]) for i in range(1, len(texts) + 1)]
+        except ValueError as exc:
+            print(f"Jev answer rejected: {exc}", flush=True)
+            return None
 
     def _ask(
         self, state: str, questions: dict[str, tuple[str, dict[str, str]]]

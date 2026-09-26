@@ -10,7 +10,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import get_args
+from typing import Any, cast, get_args
 
 import numpy as np
 import pytest
@@ -18,7 +18,7 @@ import typesafe_sdk
 from typesafe_sdk import ChoiceAnswer
 
 import intent_understanding
-from contracts import Classifier, Explainer, Labeler, RequestCount, Splitter
+from contracts import Classifier, Explainer, IntentRank, Labeler, RequestCount, Splitter
 from intent_understanding import MedGemmaSplitter
 from jev import JevClassifier
 from minilm import ActionEmbedder, MiniLMExplainer
@@ -39,6 +39,32 @@ def test_pyright_reports_no_errors() -> None:
     assert not errors, "\n".join(
         f"{d['file']}:{d['range']['start']['line'] + 1}: {d['message']}" for d in errors
     )
+
+
+# --- IntentRank: whatever a model returns, values outside the contract never reach the router.
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        {"action": "transfer_all_money"},
+        {"confidence": 1.5},
+        {"confidence": float("nan")},
+        {"request_count": cast(Any, "two")},
+        {"scores": cast(Any, {"wire_transfer_funds": "high"})},
+    ],
+    ids=["unknown-action", "confidence-above-1", "confidence-nan", "unknown-count", "text-score"],
+)
+def test_intent_rank_rejects_values_outside_the_contract(field: dict[str, Any]) -> None:
+    valid: dict[str, Any] = {
+        "action": "wire_transfer_funds",
+        "scores": {"wire_transfer_funds": 0.9},
+        "confidence": 0.9,
+        "source": "test",
+        "request_count": "one",
+    }
+    with pytest.raises(ValueError):
+        IntentRank(**{**valid, **field})
 
 
 # --- Classifier and Labeler: None means unavailable, never an exception or a guess.
@@ -85,6 +111,29 @@ def answering_classifier(monkeypatch: pytest.MonkeyPatch) -> JevClassifier:
         lambda _self, _state, questions: {name: answers[name] for name in questions},
     )
     return JevClassifier()
+
+
+@pytest.fixture(params=["jev"])
+def off_contract_classifier(monkeypatch: pytest.MonkeyPatch) -> JevClassifier:
+    """The model answers confidently with an action that is not in the catalog."""
+    answers = {
+        "action": _answer("transfer_all_money", 0.9),
+        "request_count": _answer("one", 0.9),
+        "request_1": _answer("transfer_all_money", 0.9),
+    }
+    monkeypatch.setattr(
+        JevClassifier, "_ask",
+        lambda _self, _state, questions: {name: answers[name] for name in questions},
+    )
+    return JevClassifier()
+
+
+def test_off_contract_answer_counts_as_unavailable(off_contract_classifier: Classifier) -> None:
+    assert off_contract_classifier.classify("Move everything out.") is None
+
+
+def test_off_contract_label_counts_as_unavailable(off_contract_classifier: Labeler) -> None:
+    assert off_contract_classifier.label(("Move everything out.",)) is None
 
 
 def test_classifier_answers_within_the_catalog(answering_classifier: Classifier) -> None:

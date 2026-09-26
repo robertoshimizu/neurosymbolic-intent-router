@@ -11,7 +11,7 @@ Two pieces of work sit side by side. They meet in one place: the demo passes Med
 
 ## Architecture
 
-The router never names a model. `src/contracts.py` defines four roles as `Protocol`s, plus the types they exchange, and imports nothing from the project. Each model is an adapter in its own file that explicitly subclasses the role it fulfils. `src/demo.py` is the composition root: it builds the adapters and hands them to `route()`. Swapping a model means writing a new adapter that subclasses the same roles and changing one line in `demo.py`.
+The router never names a model. `src/contracts.py` defines four roles as `Protocol`s, plus the types they exchange. It imports only the action catalog from `policy.py`, and `IntentRank` rejects any model value outside the contract (an action not in the catalog, a confidence outside 0..1, an unknown request count, a non-numeric score) before the router sees it. Each model is an adapter in its own file that explicitly subclasses the role it fulfils. `src/demo.py` is the composition root: it builds the adapters and hands them to `route()`. Swapping a model means writing a new adapter that subclasses the same roles and changing one line in `demo.py`.
 
 | Role | Contract | Today | File |
 |---|---|---|---|
@@ -48,7 +48,7 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 │ contracts.py   «Protocol» Classifier · Labeler · Splitter ·  │      │
 │                           Explainer   (@abstractmethod)      │      │
 │                IntentRank · DescriptionMatch · RequestCount  │      │
-│                imports nothing from the project              │      │
+│                imports only the catalog from policy.py       │      │
 └──────────────────────────────▲───────────────────────────────┘      │
                                │ imports the roles                    │ calls
                                │                                      ▼
@@ -287,6 +287,9 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 | minilm_agrees_with_wire_for_canonical_sentence | Real MiniLM agrees with the wire and shows no gap | integration |
 | `test_contracts.py` | | |
 | pyright_reports_no_errors | Every adapter and fake matches its role's signatures; runs pyright | unit |
+| intent_rank_rejects_values_outside_the_contract (5 cases) | Unknown action, confidence above 1 or NaN, unknown count, text score: all rejected | unit |
+| off_contract_answer_counts_as_unavailable | A confident answer outside the catalog makes the classifier unavailable | unit |
+| off_contract_label_counts_as_unavailable | The same for the labeler | unit |
 | unavailable_classifier_returns_none (no key, call fails) | An unavailable classifier returns `None`, never raises or guesses | unit |
 | unavailable_labeler_returns_none (no key, call fails) | The same for the labeler | unit |
 | classifier_answers_within_the_catalog | Actions stay in the catalog plus `none`; the count is a valid `RequestCount` | unit |
@@ -301,7 +304,7 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 | medgemma_reads_sentence (6 sentences) | Full reading, with loose keyword checks | integration |
 | medgemma_splits_requests (4 sentences) | MedGemma splits in the user's words | integration |
 
-Every unit test except `parser_keeps_items_without_a_statement_field` was checked by planting the bug it guards against and confirming that the test fails. For the contract tests, each of eight planted adapter bugs failed only the tests meant to catch it. `medgemma_reads_sentence` is weaker than it looks. Its keyword checks passed on a supplier reading that asserted a causal link the rules forbid.
+Every unit test except `parser_keeps_items_without_a_statement_field` was checked by planting the bug it guards against and confirming that the test fails. For the contract tests, each of eleven planted bugs failed only the tests meant to catch it. `medgemma_reads_sentence` is weaker than it looks. Its keyword checks passed on a supplier reading that asserted a causal link the rules forbid.
 
 ## What is not solved
 
