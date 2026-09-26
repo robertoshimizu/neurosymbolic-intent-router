@@ -18,7 +18,7 @@ RequestCount = Literal["none", "one", "several"]
 
 @dataclass(frozen=True)
 class IntentRank:
-    """A classifier's proposal. Policy has not run yet."""
+    """A classifier's reading of the text: which catalog intent it expresses. Not an action; policy has not run yet."""
 
     action: str
     scores: dict[str, float]
@@ -58,14 +58,14 @@ class DescriptionMatch:
 
 
 class Classifier(Protocol):
-    """Picks one catalog action and counts the requests. Unsure answers are `none`; None means unavailable."""
+    """Reads which catalog intent the text expresses and counts the requests. Unsure answers are `none`; None means unavailable."""
 
     @abstractmethod
     def classify(self, text: str) -> IntentRank | None: ...
 
 
 class Labeler(Protocol):
-    """Picks one catalog action per request. Unsure answers are `none`; None means unavailable."""
+    """Reads which catalog intent each request expresses. Unsure answers are `none`; None means unavailable."""
 
     @abstractmethod
     def label(self, texts: tuple[str, ...]) -> list[IntentRank] | None: ...

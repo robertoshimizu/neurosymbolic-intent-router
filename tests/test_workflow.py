@@ -1,4 +1,4 @@
-"""Tests for the request workflow: routing (models propose, rules decide) is one state; executing re-checks facts."""
+"""Tests for the request workflow: routing (models interpret, rules decide) is one state; executing re-checks facts."""
 
 from __future__ import annotations
 

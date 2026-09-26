@@ -1,6 +1,6 @@
 # neurosymbolic-intent-router
 
-**Models propose, rules decide.**
+**Models interpret, rules decide.** Language models are used only to understand the text; they never choose an action.
 
 ## Goal
 
@@ -10,11 +10,11 @@ Banking is the test domain, because the cost of a wrong action is obvious there.
 
 ## Hypothesis
 
-**H1: Models propose, rules decide.** A workflow in which a language model only *proposes* an action, and symbolic rules *decide* whether it runs, acts wrongly less often than a workflow in which the model decides alone. The price is lower recall on requests the rules cannot verify.
+**H1: Models interpret, rules decide.** A workflow in which language models only *interpret* the text (which intent it expresses, how many requests it makes, what each request says), and symbolic rules *decide* which action, if any, runs, acts wrongly less often than a workflow in which a model chooses the action. The price is lower recall on requests the rules cannot verify.
 
-*Why we expect this:* language models are good at reading language, but their answers are not calibrated, can vary between runs, and can be confidently wrong. Rules cannot read language, but they are deterministic, auditable, and can refuse. Dividing the work plays to both strengths.
+*Why we expect this:* language models are good at reading language, but their answers are not calibrated, can vary between runs, and can be confidently wrong. Rules cannot read language, but they are deterministic, auditable, and can refuse. Dividing the work plays to both strengths: the models do the reading, and only the rules turn that reading into an action.
 
-**H2: The model never moves the workflow.** Choosing the right action is only half the risk. The other half is carrying it out: acting on a stale fact, running a step out of order, or moving money twice. An explicit finite state machine turns "only the rules' decision and the ledger's facts move the workflow" into structure. The neuro-symbolic step is one state, `routing`: the models propose and the rules decide inside it, and its only exit is the rules' decision. So:
+**H2: The model never moves the workflow.** Choosing the right action is only half the risk. The other half is carrying it out: acting on a stale fact, running a step out of order, or moving money twice. An explicit finite state machine turns "only the rules' decision and the ledger's facts move the workflow" into structure. The neuro-symbolic step is one state, `routing`: the models interpret the text and the rules decide the action inside it, and its only exit is the rules' decision. So:
 - events that are not allowed from the current state are rejected;
 - facts are re-checked when the action runs, not when it was requested (a wire is authorized only if the account is still open and the funds still cover it);
 - final states are final, and money moves once.
@@ -39,7 +39,7 @@ In many agent designs the model chooses the next step. Here the model's output i
 │    │ start                                                 │
 │    ▼                                                       │
 │ ┌──────────────────── routing ────────────────────┐        │
-│ │  NEURAL · propose                               │        │
+│ │  NEURAL · interpret                             │        │
 │ │    What is being asked? How many requests?      │        │
 │ │  SYMBOLIC · decide                              │        │
 │ │    Inside the contract? Which request first?    │        │
@@ -58,7 +58,7 @@ In many agent designs the model chooses the next step. Here the model's output i
 ```
 
 
-- **Neural parts propose.** A classifier picks the requested action and counts the requests, a splitter separates a sentence with several requests, and an explainer shows how close the sentence is to each action's description. Each is a swappable model behind a contract (Jev, MedGemma and MiniLM today).
+- **Neural parts interpret.** A classifier reads which catalog intent the text expresses (or none) and counts the requests, a splitter separates a sentence with several requests, and an explainer shows how close the sentence is to each intent's description. None of them chooses or authorizes an action. Each is a swappable model behind a contract (Jev, MedGemma and MiniLM today).
 - **Symbolic parts decide.**
   - Policy rules check the session and the ledger.
   - A fixed precedence rule orders multiple requests.
@@ -158,7 +158,7 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 - **One classifier call per sentence.** That call returns both the action and the request count. A second call happens only when there are several requests, and it labels all of them at once.
 - **A rule, not a model, orders requests.** `ACTION_PRECEDENCE` in `policy.py` puts reads, then the wire, then deletion, then `none`. Only the first request is decided. The rest are listed as follow-ups and never run on their own.
 - **No human confirmation step.** It would catch the router's mistakes and hide them from any measurement. The router is judged on its own decision. Human-in-the-loop could be tested later as a separate hypothesis.
-- **Neural and symbolic share one state.** `routing` runs the whole propose-and-decide step, because a state needs one clear exit: the rules' decision, `deny` or `execute`. Splitting "propose" and "decide" into separate states would give the models' output its own transition. Inside `routing`, `route()` stays a pure function.
+- **Neural and symbolic share one state.** `routing` runs the whole interpret-and-decide step, because a state needs one clear exit: the rules' decision, `deny` or `execute`. Splitting "interpret" and "decide" into separate states would give the models' reading its own transition. Inside `routing`, `route()` stays a pure function.
 - **Policy is pure.** `policy.decide(text, action, session, ledger)` judges an action that has already been chosen, with no model code.
 - **Keys stay with their adapter.** `jev.py` and `minilm.py` each load their own key from `.env`. The router loads nothing.
 

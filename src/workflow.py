@@ -1,7 +1,7 @@
 """One user request, from its text to its effect on the ledger.
 
-`routing` is one state that holds the neuro-symbolic step: the models propose,
-the rules decide. Its only exit is the rules' decision (deny or execute).
+`routing` is one state that holds the neuro-symbolic step: the models interpret
+the text, the rules decide the action. Its only exit is the rules' decision (deny or execute).
 `executing` then re-checks the ledger's facts before anything moves.
 """
 
@@ -60,7 +60,7 @@ class RequestWorkflow(StateChart):
         self.path.append(target.id)
 
     def on_enter_routing(self) -> None:
-        """Neural propose + symbolic decide, as one step. The decision is the only way out."""
+        """Neural interpret + symbolic decide, as one step. The rules' decision is the only way out."""
         self.decision = route(
             self.utterance, self.session, self.ledger,
             classifier=self.roles["classifier"], labeler=self.roles["labeler"],
