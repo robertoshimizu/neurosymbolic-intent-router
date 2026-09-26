@@ -12,6 +12,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "instructor>=1.17.0",
+    "openai>=3.3.0",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
 ]
@@ -21,6 +23,7 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
     "integration: loads the sentence-transformers MiniLM model",
+    "ollama: structured-output experiment against a local Ollama model (slow)",
 ]
 
 [tool.pyright]
