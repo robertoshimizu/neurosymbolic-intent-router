@@ -2,22 +2,75 @@
 
 This repository is a small experiment in routing a user's sentence to an action without letting the model authorize the action.
 
-Two pieces of work sit side by side. They meet in one place: `route()` uses the MedGemma splitter when Jev counts several requests.
+Two pieces of work sit side by side. They meet in one place: the demo passes MedGemma's splitter to `route()` for sentences that make several requests.
 
 - `src/router.py`, `src/policy.py` and `src/transfer.py` route a banking sentence. A classifier proposes an action. Rules about the session and the ledger decide whether that action may run. A wire then moves through a state machine and debits an in-memory balance once.
 - `src/intent_understanding.py` is a separate reading of a sentence. It asks a local model what the text supports. Only its `MedGemmaSplitter` is used by the router.
 
-The router depends on three roles, not on models. Each role is a small `Protocol` in `router.py`, and each model sits in its own file. Only `src/demo.py`, the entry point that wires the models in, names them.
+`src/coffee.py` is only a short example of the `python-statemachine` library.
+
+## Architecture
+
+The router never names a model. It defines three roles as small `Protocol`s and depends only on them. Each model is an adapter in its own file that fulfils one role. `src/demo.py` is the composition root: it builds the adapters and hands them to `route()`. Swapping a model means writing a new adapter and changing one line in `demo.py`.
 
 | Role | Contract | Today | File |
 |---|---|---|---|
-| Classifier | `classify(text)`: action (or `none`), confidence, request count. `label(texts)`: one action per text. | Jev | `src/jev.py` |
+| Classifier | `classify(text)`: action (or `none`), confidence, request count. `label(texts)`: one action per text. `None` means unavailable. | Jev | `src/jev.py` |
 | Splitter | `split(text)`: the separate requests, in the order written | MedGemma | `src/intent_understanding.py` |
-| Explainer | `explain(text, action)`: a display-only note | MiniLM | `src/minilm.py` |
+| Explainer | `explain(text, action)`: a display-only note on the chosen action | MiniLM | `src/minilm.py` |
 
-Each adapter keeps its own calibration. Jev's 0.5 confidence floor lives in `jev.py` and turns unsure answers into `none`. MiniLM's 0.45 description-gap floor lives in `minilm.py`. `policy.py` holds the catalog, the precedence rule and `policy.decide()`, with no model code.
+Arrows mean "imports". The dependency inversion is in the middle band: the arrows run from the adapters (the details) into `router.py` (the high-level rules), because the adapters implement the router's roles and return its types. `router.py` imports only the domain below it, never an adapter. `MedGemmaSplitter` fits `Splitter` by shape alone, so it imports nothing from the router. Two kinds of arrows are left out: the adapters read the action catalog from `policy.py`, and `demo.py` also imports `policy.py` and `transfer.py` to build the sessions and the ledger.
 
-`src/coffee.py` is only a short example of the `python-statemachine` library.
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ demo.py            composition root: builds the adapters and wires   │
+│                    them into route(). The only file naming models.   │
+└─────┬───────────────────┬────────────────────┬─────────────────┬─────┘
+      │ builds            │ builds             │ builds          │ calls route(text,
+      ▼                   ▼                    ▼                 │   classifier=,
+┌───────────────┐  ┌─────────────────┐  ┌──────────────────────┐ │   splitter=,
+│ jev.py        │  │ minilm.py       │  │ intent_understanding │ │   explainer=)
+│ JevClassifier │  │ MiniLMExplainer │  │ MedGemmaSplitter     │ │
+└───────┬───────┘  └────────┬────────┘  └──────────┬───────────┘ │
+        │ implements        │ implements           ┆ implements  │
+        │ Classifier        │ Explainer            ┆ Splitter    │
+        │ (imports router)  │ (imports router)     ┆ (no import: │
+        │                   │                      ┆  structural)│
+        ▼                   ▼                      ▼             ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ router.py          «Protocol» Classifier · Splitter · Explainer      │
+│                    IntentRank · DescriptionMatch · Decision          │
+│                    route() · decide()        imports no adapter      │
+└──────────────────────────────────┬───────────────────────────────────┘
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ policy.py          catalog · ACTION_PRECEDENCE · Session             │
+│                    parse_request · policy.decide()    no model code  │
+└──────────────────────────────────┬───────────────────────────────────┘
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ transfer.py        Ledger · WireTransfer (python-statemachine)       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Design decisions
+
+- **Roles, not models.** `route()` and `decide()` take a `classifier`, a `splitter` and an `explainer`. Tests pass simple fakes, so they check the router's rules, not a model's judgment.
+- **Each adapter owns its calibration.** Jev's 0.5 confidence floor lives in `jev.py` and turns an unsure answer into `none`. MiniLM's 0.45 description-gap floor lives in `minilm.py`. The router sees only an action or `none`, so two scales never meet in one rule.
+- **No fallback.** If the classifier is missing or down, the sentence is denied with "classifier unavailable". MiniLM used to rank in Jev's place, and it gave absurd sentences whichever action was least far away.
+- **The explainer never votes.** MiniLM's scores are printed beside the classifier's, and a disagreement is labelled a description gap. It never changes the decision.
+- **The splitter has one narrow job.** MedGemma only rewrites a sentence into separate requests. When it also chose actions, it copied the catalog descriptions and lost "$500", so labelling stays with the classifier.
+- **One classifier call per sentence.** That call returns both the action and the request count. A second call happens only when there are several requests, and it labels all of them at once.
+- **A rule, not a model, orders requests.** `ACTION_PRECEDENCE` in `policy.py` puts reads, then the wire, then deletion, then `none`. Only the first request is decided. The rest are listed as follow-ups and never run on their own.
+- **Policy is pure.** `policy.decide(text, action, session, ledger)` judges an action that has already been chosen, with no model code.
+- **Keys stay with their adapter.** `jev.py` and `minilm.py` each load their own key from `.env`. The router loads nothing.
+
+### Known limits of this design
+
+- The Protocols and shared types live in `router.py`, so an adapter that imports them loads the router module too. A separate module for the contracts would remove that.
+- `Classifier` bundles `classify` and `label`. A model that can only do one must still provide both.
+- `request_count` is a plain string. A classifier that answers `"two"` instead of `"several"` would silently be treated as one request.
+- A new action means editing `ACTION_CATALOG`, `ACTION_PRECEDENCE` and the `if action == ...` branches in `policy.py`. With four actions this was left as is.
 
 ## Run
 
@@ -38,82 +91,86 @@ uv run pytest tests/test_intent_understanding.py -m integration -s
 
 ## The router
 
-`route()` in `src/router.py` is the entry point.
+`route()` in `src/router.py` is the router's entry point; `src/demo.py` is the program's. Jev, MedGemma and MiniLM appear below as the adapters that `demo.py` wires in today.
 
-1. Jev receives the sentence in one call with two closed questions: which action (the four catalog actions plus `none`), and how many requests the sentence makes (`none`, `one`, `several`). Identity, role, and balance are not sent.
-2. If the count is not `several`, the sentence goes straight to `decide()` with that Jev answer. Most sentences stop here.
-3. If the count is `several`, MedGemma splits the sentence into plain requests in the user's own words. It does not choose actions. Jev then labels every split request in one call. The Jev adapter returns a label under 0.5 confidence as `none`.
-4. A fixed rule, `ACTION_PRECEDENCE`, orders the requests: reads, then the wire, then deletion, then `none`. Only the first goes to `decide()`. The others are listed as follow-ups and are not evaluated. If the first is denied, nothing is listed. If the split or the labeling fails, the sentence is denied.
+1. The classifier receives the sentence in one call. Jev answers two closed questions: which action (the four catalog actions plus `none`), and how many requests the sentence makes (`none`, `one`, `several`). Identity, role, and balance are not sent. If the classifier is missing or down, the sentence is denied with "classifier unavailable".
+2. If the count is not `several`, the sentence goes straight to `decide()` with that answer. Most sentences stop here.
+3. If the count is `several`, the splitter (MedGemma) rewrites the sentence as plain requests in the user's own words. It does not choose actions. The classifier then labels every request in one call.
+4. `ACTION_PRECEDENCE` orders the requests: reads, then the wire, then deletion, then `none`. Only the first goes to `decide()`. The others are listed as follow-ups and are not evaluated. If the first is denied, nothing is listed. If the split or the labelling fails, the sentence is denied.
 
 `decide()` then applies the rules.
 
-1. If the classifier returns `none` (for Jev, also any answer under 0.5 confidence), the outcome is deny and the reason is "no matching action". Banking rules do not run.
-2. If the classifier commits to a catalog action, the explainer (MiniLM) scores the sentence against the written action descriptions. Those scores are printed beside the classifier's. They do not change the choice. A disagreement is labeled a description gap.
-3. Policy then uses the session and the ledger. A wire needs authentication, an active account, a parsed amount, an allowlisted payee, and enough balance. A deletion needs an authenticated admin. A wire or a deletion stops at confirmation. `WireTransfer` in `src/transfer.py` moves drafted, awaiting confirmation, authorized, submitted, settled. The ledger debits on settle, once per transfer id.
+1. A `none` action is denied with "no matching action". Banking rules do not run. For Jev, an answer under 0.5 confidence has already become `none` inside the adapter.
+2. For a catalog action, the explainer (MiniLM) scores the sentence against the written action descriptions. The scores are printed beside the classifier's and never change the choice.
+3. `policy.decide()` uses the session and the ledger. A wire needs authentication, an active account, a parsed amount, an allowlisted payee, and enough balance. A deletion needs an authenticated admin. A wire or a deletion stops at confirmation. `WireTransfer` in `src/transfer.py` moves drafted, awaiting confirmation, authorized, submitted, settled. The ledger debits on settle, once per transfer id.
 
-If the classifier is missing or cannot be called, the sentence is denied with "classifier unavailable". Nothing guesses in its place; the old MiniLM fallback was removed.
+The chart shows calls at runtime. The Architecture section shows which module imports which.
 
 ```
-                       user sentence
-                             │
-                             ▼
-               ┌───────────────────────────┐
-               │  route()                  │
-               │  Jev: 1 call, 2 questions │
-               │   • action (catalog+none) │
-               │   • request_count         │
-               │  (Jev down → DENY)        │
-               └─────────────┬─────────────┘
-                             │
-               request_count == "several"?
-                 │                      │
-                no                     yes
-                 │                      ▼
-                 │     ┌──────────────────────────────┐
-                 │     │ Splitter.split (MedGemma)    │
-                 │     │ → plain request lines        │
-                 │     └──────────────┬───────────────┘
-                 │          fails or < 2 lines ──► DENY
-                 │                    ▼
-                 │     ┌──────────────────────────────┐
-                 │     │ Classifier.label (Jev)       │
-                 │     │ 1 call, 1 question per line  │
-                 │     └──────────────┬───────────────┘
-                 │          fails ──────────────► DENY
-                 │                    ▼
-                 │     ┌──────────────────────────────┐
-                 │     │ ACTION_PRECEDENCE (rule)     │
-                 │     │ reads → wire → delete → none │
-                 │     │ pick first; keep rest as     │
-                 │     │ follow_ups                   │
-                 │     └──────────────┬───────────────┘
-                 │                    │ first request + its Jev rank
-                 ▼                    ▼
-               ┌───────────────────────────┐
-               │  decide()                 │
-               │  1. action == none        │──► DENY "no matching action"
-               │  2. Explainer (MiniLM)    │    (explanation only, no vote)
-               │  3. parse_request()       │    ($ amount, allowlisted payee)
-               │  4. evaluate_action()     │──► DENY (policy reason)
-               │     session + ledger      │
-               │  5. wire or delete?       │──► NEEDS_CONFIRMATION
-               │  6. otherwise             │──► EXECUTE
-               └─────────────┬─────────────┘
-                             ▼
-               Decision (+ follow_ups if not denied)
-                             │
-                             ▼
-               print_decision()   (src/demo.py)
-                             │
-            needs_confirmation + wire?
-                             ▼
-               ┌───────────────────────────┐
-               │ WireTransfer (transfer.py)│
-               │ drafted → awaiting_conf → │
-               │ authorized → submitted →  │
-               │ settled → Ledger.debit()  │
-               │ (once per transfer id)    │
-               └───────────────────────────┘
+                     user sentence
+                           │
+                           ▼
+          ┌──────────────────────────────────┐
+          │ route()                router.py │
+          │ Classifier.classify: 1 call      │
+          │   • action (catalog + none)      │
+          │   • request_count                │
+          │ None / error ──► DENY            │
+          │   "classifier unavailable"       │
+          └────────────────┬─────────────────┘
+                           │
+             request_count == "several"?
+               │                        │
+              no                       yes
+               │                        ▼
+               │       ┌──────────────────────────────────┐
+               │       │ Splitter.split                   │
+               │       │ → plain requests, as written     │
+               │       └────────────────┬─────────────────┘
+               │           fails or < 2 ──► DENY
+               │                        ▼
+               │       ┌──────────────────────────────────┐
+               │       │ Classifier.label                 │
+               │       │ 1 call, 1 question per request   │
+               │       └────────────────┬─────────────────┘
+               │           fails ──────────► DENY
+               │                        ▼
+               │       ┌──────────────────────────────────┐
+               │       │ ACTION_PRECEDENCE      policy.py │
+               │       │ reads → wire → delete → none     │
+               │       │ first is decided; the rest       │
+               │       │ become follow_ups                │
+               │       └────────────────┬─────────────────┘
+               │                        │ first request + its rank
+               ▼                        ▼
+          ┌──────────────────────────────────┐
+          │ decide()               router.py │
+          │ 1. action == none ──► DENY       │
+          │    "no matching action"          │
+          │ 2. Explainer.explain             │
+          │    display only, no vote         │
+          │ 3. policy.decide()     policy.py │
+          │    parse_request, then           │
+          │    evaluate_action with          │
+          │    session + ledger ──► DENY     │
+          │    wire or delete ──► CONFIRM    │
+          │    otherwise ──► EXECUTE         │
+          └────────────────┬─────────────────┘
+                           ▼
+          Decision (+ follow_ups if not denied)
+                           │
+                           ▼
+          print_decision()               demo.py
+                           │
+            needs confirmation + wire?
+                           ▼
+          ┌──────────────────────────────────┐
+          │ WireTransfer         transfer.py │
+          │ drafted → awaiting_confirmation  │
+          │ → authorized → submitted →       │
+          │ settled → Ledger.debit()         │
+          │ (once per transfer id)           │
+          └──────────────────────────────────┘
 ```
 
 On a clear sentence, "I want to send $5,000 to my external bank account.", the three sessions behave as follows. A guest is denied because they are not signed in. A customer with no balance is denied for insufficient funds. A customer with $10,000 is asked to confirm, and settlement leaves $5,000.
