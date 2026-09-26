@@ -9,6 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
+from uuid import uuid4
 
 import janus_swi as janus
 
@@ -19,8 +20,8 @@ RULES_FILE = Path(__file__).with_name("policy.pl")
 
 
 class PrologPolicy(Policy):
-    """Asks policy:denials/3 for every reason an action is denied, policy:suggestion/3 for what to offer,
-    and policy:ordered/2 for the handling order of several requests."""
+    """Asserts one request's facts, asks policy:denials/3 for every reason an action is denied and
+    policy:suggestion/3 for what to offer, then forgets the facts. policy:ordered/2 orders several requests."""
 
     def __init__(self, rules_file: Path = RULES_FILE) -> None:
         janus.consult(str(rules_file))
@@ -28,22 +29,38 @@ class PrologPolicy(Policy):
     def evaluate(
         self, action: str, session: Session, balance: Decimal, parsed: ParsedRequest
     ) -> PolicyResult:
-        facts = {
-            "authenticated": session.is_authenticated,
-            "status": session.status,
-            "role": session.role,
-            "amount": None if parsed.amount is None else Fraction(parsed.amount),
-            "payee": parsed.payee,
-            "balance": Fraction(balance),
-        }
-        answer = janus.query_once("policy:denials(A, F, R)", {"A": action, "F": facts})
+        request = f"r{uuid4().hex}"
+        try:
+            self._assert_facts(request, session, balance, parsed)
+            return self._judge(action, request)
+        finally:
+            janus.query_once("policy:forget(R)", {"R": request})
+
+    def _assert_facts(self, request: str, session: Session, balance: Decimal, parsed: ParsedRequest) -> None:
+        """One Prolog fact per known value. Values are bound, never spliced into Prolog text."""
+        facts: list[tuple[str, dict[str, object]]] = [
+            ("policy:account_status(R, V)", {"V": session.status}),
+            ("policy:role(R, V)", {"V": session.role}),
+            ("policy:balance(R, V)", {"V": Fraction(balance)}),
+        ]
+        if session.is_authenticated:
+            facts.append(("policy:authenticated(R)", {}))
+        if parsed.amount is not None:
+            facts.append(("policy:amount(R, V)", {"V": Fraction(parsed.amount)}))
+        if parsed.payee is not None:
+            facts.append(("policy:payee(R, V)", {"V": parsed.payee}))
+        for fact, values in facts:
+            janus.query_once(f"assertz({fact})", {"R": request, **values})
+
+    def _judge(self, action: str, request: str) -> PolicyResult:
+        answer = janus.query_once("policy:denials(A, R, Reasons)", {"A": action, "R": request})
         if not answer["truth"]:
             raise RuntimeError(f"policy:denials/3 failed for {action!r}")
-        reasons = answer["R"]
+        reasons = answer["Reasons"]
         if not isinstance(reasons, list):
             raise ValueError(f"policy:denials/3 returned {reasons!r}, not a list")
         if reasons:
-            offer = janus.query_once("policy:suggestion(A, F, S)", {"A": action, "F": facts})
+            offer = janus.query_once("policy:suggestion(A, R, S)", {"A": action, "R": request})
             return PolicyResult(
                 allowed=False,
                 reasons=tuple(reasons),

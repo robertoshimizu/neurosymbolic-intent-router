@@ -1,14 +1,19 @@
 /*  Banking policy rules. Same rules as RULES in policy.py.
 
-    Facts is a dict built by the Python adapter:
-      authenticated: @true | @false   (janus form of Python bool)
-      status, role:  atoms
-      amount:        @none | an exact rational
-      payee:         @none | a string
-      balance:       an exact rational
+    The Python adapter asserts facts about one request R, queries, then calls
+    forget(R). A value the request does not have is simply not asserted:
+      authenticated(R)          the caller is authenticated
+      account_status(R, S)      S is an atom, e.g. active
+      role(R, Role)             Role is an atom, e.g. customer, admin
+      amount(R, A)              the parsed amount, an exact rational
+      payee(R, P)               the payee, if it is on the allowlist
+      balance(R, B)             the account balance, an exact rational
 */
 
-:- module(policy, [denials/3, permitted_message/2, suggestion/3, ordered/2]).
+:- module(policy, [denials/3, permitted_message/2, suggestion/3, ordered/2, forget/1,
+                   authenticated/1, account_status/2, role/2, amount/2, payee/2, balance/2]).
+
+:- dynamic authenticated/1, account_status/2, role/2, amount/2, payee/2, balance/2.
 
 action(wire_transfer_funds).
 action(view_account_balance).
@@ -26,6 +31,56 @@ permitted_message(view_account_balance, "balance view permitted").
 permitted_message(delete_account,       "account deletion permitted").
 permitted_message(view_public_faq,      "public faq always allowed").
 
+%   Clause order is the reported order of reasons.
+denied(Action, _, "unknown action denied") :-
+    \+ action(Action).
+
+denied(wire_transfer_funds, R, "caller is not authenticated") :-
+    \+ authenticated(R).
+denied(wire_transfer_funds, R, "account is not active") :-
+    \+ account_status(R, active).
+denied(wire_transfer_funds, R, "transfer amount is missing or invalid") :-
+    \+ positive_amount(R).
+denied(wire_transfer_funds, R, "payee is not on the allowlist") :-
+    \+ payee(R, _).
+denied(wire_transfer_funds, R, "insufficient funds for the requested amount") :-
+    insufficient_funds(R).
+
+denied(view_account_balance, R, "caller is not authenticated") :-
+    \+ authenticated(R).
+
+denied(delete_account, R, "delete requires an authenticated admin") :-
+    \+ admin(R).
+
+%   After a denial, offer an action only if it is itself permitted.
+suggests(wire_transfer_funds, R, view_account_balance) :-
+    insufficient_funds(R).
+
+positive_amount(R) :-
+    amount(R, Amount),
+    Amount > 0.
+
+insufficient_funds(R) :-
+    amount(R, Amount),
+    balance(R, Balance),
+    Amount > Balance.
+
+admin(R) :-
+    authenticated(R),
+    role(R, admin).
+
+%!  denials(+Action, +R, -Reasons) is det.
+%   Every reason Action is denied for request R, in clause order. [] means permitted.
+denials(Action, R, Reasons) :-
+    findall(Reason, denied(Action, R, Reason), Reasons).
+
+%!  suggestion(+Action, +R, -Suggested) is semidet.
+%   The first permitted action to offer after Action is denied.
+suggestion(Action, R, Suggested) :-
+    suggests(Action, R, Suggested),
+    denials(Suggested, R, []),
+    !.
+
 %!  ordered(+Actions, -Positions) is det.
 %   Positions (0-based) of Actions by precedence. Ties keep the written order;
 %   none and unknown actions go last.
@@ -42,52 +97,12 @@ rank(Action, Rank) :-
     ;   Rank = 99
     ).
 
-%!  denials(+Action, +Facts, -Reasons) is det.
-%   Every reason Action is denied, in clause order. [] means permitted.
-denials(Action, Facts, Reasons) :-
-    findall(Reason, denied(Action, Facts, Reason), Reasons).
-
-%   Clause order is the reported order of reasons.
-denied(Action, _, "unknown action denied") :-
-    \+ action(Action).
-
-denied(wire_transfer_funds, F, "caller is not authenticated") :-
-    \+ authenticated(F).
-denied(wire_transfer_funds, F, "account is not active") :-
-    \+ get_dict(status, F, active).
-denied(wire_transfer_funds, F, "transfer amount is missing or invalid") :-
-    \+ positive_amount(F).
-denied(wire_transfer_funds, F, "payee is not on the allowlist") :-
-    get_dict(payee, F, @none).
-denied(wire_transfer_funds, F, "insufficient funds for the requested amount") :-
-    insufficient_funds(F).
-
-denied(view_account_balance, F, "caller is not authenticated") :-
-    \+ authenticated(F).
-
-denied(delete_account, F, "delete requires an authenticated admin") :-
-    \+ ( authenticated(F), get_dict(role, F, admin) ).
-
-%!  suggestion(+Action, +Facts, -Suggested) is semidet.
-%   A permitted action to offer after Action is denied. First match only.
-suggestion(Action, Facts, Suggested) :-
-    suggests(Action, Facts, Suggested),
-    denials(Suggested, Facts, []),
-    !.
-
-suggests(wire_transfer_funds, F, view_account_balance) :-
-    insufficient_funds(F).
-
-insufficient_funds(F) :-
-    get_dict(amount, F, Amount),
-    number(Amount),
-    get_dict(balance, F, Balance),
-    Amount > Balance.
-
-authenticated(F) :-
-    get_dict(authenticated, F, @true).
-
-positive_amount(F) :-
-    get_dict(amount, F, Amount),
-    number(Amount),
-    Amount > 0.
+%!  forget(+R) is det.
+%   Remove every fact about request R.
+forget(R) :-
+    retractall(authenticated(R)),
+    retractall(account_status(R, _)),
+    retractall(role(R, _)),
+    retractall(amount(R, _)),
+    retractall(payee(R, _)),
+    retractall(balance(R, _)).

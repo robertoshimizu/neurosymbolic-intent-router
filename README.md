@@ -127,7 +127,7 @@ You also asked (ask again to proceed):
 Workflow: received -> routing -> executing -> completed (wire of $500 settled). Balance now $9500
 ```
 
-The rules behind these outcomes, from `src/policy.pl`:
+The rules behind these outcomes, from `src/policy.pl`. For each request `R`, the Python adapter asserts facts such as `authenticated(R)`, `amount(R, 500)` and `balance(R, 10000)`; a value the request lacks is simply not asserted:
 
 ```prolog
 %   Handling order for several requests: reads, then money movement, then deletion.
@@ -136,32 +136,46 @@ precedence(view_account_balance, 0).
 precedence(wire_transfer_funds,  1).
 precedence(delete_account,       2).
 
-denied(wire_transfer_funds, F, "caller is not authenticated") :-
-    \+ authenticated(F).
-denied(wire_transfer_funds, F, "account is not active") :-
-    \+ get_dict(status, F, active).
-denied(wire_transfer_funds, F, "transfer amount is missing or invalid") :-
-    \+ positive_amount(F).
-denied(wire_transfer_funds, F, "payee is not on the allowlist") :-
-    get_dict(payee, F, @none).
-denied(wire_transfer_funds, F, "insufficient funds for the requested amount") :-
-    insufficient_funds(F).
+denied(wire_transfer_funds, R, "caller is not authenticated") :-
+    \+ authenticated(R).
+denied(wire_transfer_funds, R, "account is not active") :-
+    \+ account_status(R, active).
+denied(wire_transfer_funds, R, "transfer amount is missing or invalid") :-
+    \+ positive_amount(R).
+denied(wire_transfer_funds, R, "payee is not on the allowlist") :-
+    \+ payee(R, _).
+denied(wire_transfer_funds, R, "insufficient funds for the requested amount") :-
+    insufficient_funds(R).
 
-denied(view_account_balance, F, "caller is not authenticated") :-
-    \+ authenticated(F).
+denied(view_account_balance, R, "caller is not authenticated") :-
+    \+ authenticated(R).
 
-denied(delete_account, F, "delete requires an authenticated admin") :-
-    \+ ( authenticated(F), get_dict(role, F, admin) ).
+denied(delete_account, R, "delete requires an authenticated admin") :-
+    \+ admin(R).
 
-%!  suggestion(+Action, +Facts, -Suggested) is semidet.
-%   A permitted action to offer after Action is denied. First match only.
-suggestion(Action, Facts, Suggested) :-
-    suggests(Action, Facts, Suggested),
-    denials(Suggested, Facts, []),
+%   After a denial, offer an action only if it is itself permitted.
+suggests(wire_transfer_funds, R, view_account_balance) :-
+    insufficient_funds(R).
+
+positive_amount(R) :-
+    amount(R, Amount),
+    Amount > 0.
+
+insufficient_funds(R) :-
+    amount(R, Amount),
+    balance(R, Balance),
+    Amount > Balance.
+
+admin(R) :-
+    authenticated(R),
+    role(R, admin).
+
+%!  suggestion(+Action, +R, -Suggested) is semidet.
+%   The first permitted action to offer after Action is denied.
+suggestion(Action, R, Suggested) :-
+    suggests(Action, R, Suggested),
+    denials(Suggested, R, []),
     !.
-
-suggests(wire_transfer_funds, F, view_account_balance) :-
-    insufficient_funds(F).
 ```
 
 What it shows: the models read the same sentence the same way for all three customers; only the rules and the ledger make the outcomes differ. The model's 0.99 confidence does not move money for the user who is not authenticated. `--policy python` prints the same decisions.
