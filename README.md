@@ -176,7 +176,7 @@ Next steps:
 | `src/policy.py` | Catalog, precedence rule and banking policy (symbolic) |
 | `src/workflow.py` | `RequestWorkflow` state machine: from the sentence, through routing, to its effect |
 | `src/transfer.py` | `WireTransfer` state machine, and the ledger (balances, once-only debits, closed accounts) |
-| `src/jev.py`, `src/minilm.py`, `src/intent_understanding.py` | Model adapters (neural). `intent_understanding.py` also holds a separate experiment in reading a whole sentence. |
+| `src/jev.py`, `src/minilm.py`, `src/intent_understanding.py` | Model adapters (neural). |
 | `src/demo.py` | Wires the models together and runs three sessions |
 | `src/coffee.py` | A minimal `python-statemachine` example |
 
@@ -270,7 +270,7 @@ uv run pyright
 
 The demo calls TypeSafe Jev when `TYPESAFE_API_KEY` is set in `.env`. That file is gitignored. MiniLM weights and embedding vectors are cached under `.cache/`, which is also gitignored. Hugging Face downloads use `HF_TOKEN` from the same `.env` file. Neither value is printed.
 
-The sentence reader and the splitter call local Ollama. They expect `medgemma:27b`. The full reading does not use the router; `route()` uses only the splitter.
+The splitter calls local Ollama. It expects `medgemma:27b`.
 
 ```bash
 uv run pytest tests/test_intent_understanding.py -m integration -s
@@ -388,24 +388,6 @@ TypeSafe's own guidance is that one choice should be a snap judgment, and that a
 
 MiniLM makes the gap visible. Each cosine is closeness to a description we wrote. It is not a calibrated probability, and it must not cast a second vote. That is why it no longer ranks when Jev is down: as a fallback it gave an absurd sentence whichever action was least far away.
 
-## The open task: read the sentence first
-
-`src/intent_understanding.py` is the attempt to read a sentence before any router exists. The router uses only its `MedGemmaSplitter`, wired in by the demo; the full reading is not used by the router.
-
-The prompt asks MedGemma 27B, through local Ollama with thinking turned off, to extract entities, relationships, events, causes, concepts, implicit facts, and temporal links. Each claim is marked:
-
-- `EXPLICIT` when the text states it
-- `ENTAILED` when it necessarily follows
-- `INFERRED` when it is plausible but not necessary
-- `UNKNOWN` when the text does not establish it
-- `AMBIGUOUS` when a pronoun has more than one possible antecedent
-
-Time order ("after", "shortly after", "subsequently") must not be rewritten as a cause. World knowledge must not promote a guess into a fact. The same instructions are used for every sentence. Only the passage after `TEXT TO ANALYZE:` changes.
-
-The command-line form that produced a usable reading is one user message: those instructions, then the sentence. The code sends that same message. It stores the JSON MedGemma returns. It does not rename fields and it does not drop an item because the field is called `entity` or `event` instead of `statement`.
-
-On the supplier passage, that reading keeps the withdrawal and the stopped shipping as events, keeps "shortly after" and "subsequently" as time, and marks a causal link between them as `INFERRED`. On "What is the capital of Portugal?" it returns Portugal and a capital link whose target is unknown, instead of an empty object.
-
 ## Challenges
 
 **A closed label set cannot represent a mixed sentence.** Adding `none` stops unrelated text. It does not split "close the account and send the cash" into two explicit requests. Forcing one winner hides the second request.
@@ -417,12 +399,9 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 **The amount in words and the amount in symbols diverged.** Jev treated "five thousand dollars" as a wire. The ledger rule never saw an amount, because the parser looked for `$5,000`.
 *Status: not solved.* The parser still accepts only a `$` figure. "The remaining cash" is not resolved to a balance either.
 
-**Rewriting a prompt that already worked made the readings worse.** The original instructions, sent as one message, already separated time from cause. Later drafts added a private JSON shape, moved the rules into a system message, and stacked extra bans ("never return an empty list", "do not attach a time to an event"). MedGemma followed the newest ban and dropped an earlier one. Questions came back empty, events were reduced to bare verbs, or the same events were copied into the causal section so the list would not be blank. A second bug hid good answers: the test kept only objects that contained a field named `statement`, so a correct payload in MedGemma's own shape was printed as empty.
+**Rewriting a prompt that already worked made the readings worse.** This came from an earlier full-sentence reader, since removed. Its original instructions, sent as one message, already separated time from cause. Later drafts added a private JSON shape, moved the rules into a system message, and stacked extra bans ("never return an empty list", "do not attach a time to an event"). MedGemma followed the newest ban and dropped an earlier one. Questions came back empty, events were reduced to bare verbs, or the same events were copied into the causal section so the list would not be blank. A second bug hid good answers: the test kept only objects that contained a field named `statement`, so a correct payload in MedGemma's own shape was printed as empty.
 
 *Status: a lesson, applied again.* The splitter has one narrow job. An attempt to make MedGemma also pick catalog actions made it copy the action descriptions in place of the user's words, and "$500" was lost. That job went back to Jev.
-
-**"Omit anything uncertain" and "always return something" cannot both be the loudest rule.** Precision is what keeps a guessed cause out. Treated as the only rule, it also deletes a question, because a question states no fact. The fix used here was to stop editing the instructions and to accept the model's JSON.
-*Status: open.* The full reading is unchanged and is not used for routing.
 
 ## Experiment: structured output from local models
 
@@ -430,7 +409,7 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 
 **The question.** LLMs sometimes return the wrong type. Should the project validate model output at runtime with pydantic, or force JSON with a library such as Instructor, Outlines, Guidance or PydanticAI?
 
-**What was decided for the main program.** Validation happens once, where model output becomes an `IntentRank`, with a plain dataclass check (see Architecture). Pydantic is not a direct dependency of the contracts: there are five fields, and the catalog check needs custom code either way. The Jev SDK already validates its responses with pydantic. MedGemma's split output is plain text, which a schema cannot check for meaning. The full MedGemma reading is deliberately left unschematised, because forcing a JSON shape made it worse (see Challenges).
+**What was decided for the main program.** Validation happens once, where model output becomes an `IntentRank`, with a plain dataclass check (see Architecture). Pydantic is not a direct dependency of the contracts: there are five fields, and the catalog check needs custom code either way. The Jev SDK already validates its responses with pydantic. MedGemma's split output is plain text, which a schema cannot check for meaning.
 
 **The three ways to get structured output.**
 - **Validate afterwards and retry** (Instructor, Marvin, PydanticAI). The model writes freely, the output is checked, and on failure the model is asked again. This costs another model call per retry.
@@ -525,18 +504,11 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 | classify_returns_a_catalog_action (native, instructor) | A local Ollama model returns one catalog action in a valid shape; accuracy printed | integration (ollama) |
 | split_returns_a_list_of_requests (native, instructor) | A local Ollama model returns a list of requests in a valid shape; accuracy printed | integration (ollama) |
 | `test_intent_understanding.py` | | |
-| prompt_appends_only_the_text | The prompt only appends the sentence | unit |
-| parser_keeps_items_without_a_statement_field | The JSON parser keeps MedGemma's own fields | unit |
 | parse_split_keeps_one_request_per_nonblank_line | The split parser keeps one request per line | unit |
-| medgemma_reads_sentence (6 sentences) | Full reading, with loose keyword checks | integration |
 | medgemma_splits_requests (4 sentences) | MedGemma splits in the user's words | integration |
 
-Every unit test except `parser_keeps_items_without_a_statement_field` was checked by planting the bug it guards against and confirming that the test fails. For the contract tests, each of eleven planted bugs failed only the tests meant to catch it. `medgemma_reads_sentence` is weaker than it looks. Its keyword checks passed on a supplier reading that asserted a causal link the rules forbid.
+Every unit test was checked by planting the bug it guards against and confirming that the test fails. For the contract tests, each of eleven planted bugs failed only the tests meant to catch it.
 
 ## What is not solved
 
 The router uses MedGemma only to split a sentence Jev has counted as several requests. The split is plain text, and Jev labels it. Amounts in words and "the remaining cash" are still not parsed.
-
-The full sentence reader is still an experiment. It is not a front door for the router. MedGemma still adds plausible facts (a supplier "dependent" on the credit line, a subsidiary "capable" of production) and still sometimes misses the time link in "before I wire funds out". Status labels are not stable from one run to the next, and `ENTAILED` is sometimes spelled `ENTAILLED`.
-
-Until those readings are trustworthy on mixed sentences, on questions, and on pronouns, they should not choose an action, fill an amount, or move the ledger.
