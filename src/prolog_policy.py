@@ -19,7 +19,7 @@ RULES_FILE = Path(__file__).with_name("policy.pl")
 
 
 class PrologPolicy(Policy):
-    """Asks policy:denials/3 for every reason an action is denied."""
+    """Asks policy:denials/3 for every reason an action is denied, and policy:suggestion/3 for what to offer."""
 
     def __init__(self, rules_file: Path = RULES_FILE) -> None:
         janus.consult(str(rules_file))
@@ -42,7 +42,12 @@ class PrologPolicy(Policy):
         if not isinstance(reasons, list):
             raise ValueError(f"policy:denials/3 returned {reasons!r}, not a list")
         if reasons:
-            return PolicyResult(allowed=False, reasons=tuple(reasons))
+            offer = janus.query_once("policy:suggestion(A, F, S)", {"A": action, "F": facts})
+            return PolicyResult(
+                allowed=False,
+                reasons=tuple(reasons),
+                suggestion=offer["S"] if offer["truth"] else None,
+            )
         permitted = janus.query_once("policy:permitted_message(A, M)", {"A": action})
         if not permitted["truth"]:
             raise RuntimeError(f"policy:permitted_message/2 has no entry for {action!r}")

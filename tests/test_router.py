@@ -78,6 +78,14 @@ def test_insufficient_funds_suggests_balance_view() -> None:
     assert decision.suggestion == "view_account_balance"
 
 
+def test_no_suggestion_the_policy_would_deny() -> None:
+    session = _session("unauthenticated", is_authenticated=False)
+    decision = _decide_wire(session, _ledger(Decimal("0")))
+    assert decision.outcome == "deny"
+    assert "insufficient funds" in decision.reason
+    assert decision.suggestion is None
+
+
 def test_authorize_then_settle_debits_once() -> None:
     ledger = _ledger(Decimal("10000"))
     transfer = WireTransfer(

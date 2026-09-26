@@ -187,13 +187,7 @@ def decide(
         )
 
     if not verdict.allowed:
-        suggestion = (
-            "view_account_balance"
-            if top_action == "wire_transfer_funds"
-            and any("insufficient funds" in reason for reason in verdict.reasons)
-            else None
-        )
-        return _decision("deny", policy_reason, suggestion=suggestion)
+        return _decision("deny", policy_reason, suggestion=verdict.suggestion)
 
     return _decision("execute", policy_reason)
 

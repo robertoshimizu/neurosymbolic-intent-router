@@ -89,10 +89,12 @@ class Explainer(Protocol):
 
 @dataclass(frozen=True)
 class PolicyResult:
-    """A reasoner's verdict on one action. Denied: every reason, in the reasoner's order. Allowed: the permit message."""
+    """A reasoner's verdict on one action. Denied: every reason, in the reasoner's order, and at most one
+    permitted action to offer instead. Allowed: the permit message."""
 
     allowed: bool
     reasons: tuple[str, ...]
+    suggestion: str | None = None
 
     def __post_init__(self) -> None:
         """Reasoners can return anything; reject values outside the contract before the router sees them."""
@@ -102,6 +104,11 @@ class PolicyResult:
             raise ValueError("reasons must be a non-empty tuple")
         if not all(isinstance(reason, str) and reason for reason in self.reasons):
             raise ValueError("reasons must be non-empty strings")
+        if self.suggestion is not None:
+            if self.allowed:
+                raise ValueError("an allowed action carries no suggestion")
+            if self.suggestion not in ACTION_CATALOG:
+                raise ValueError(f"suggestion {self.suggestion!r} is not in the catalog")
 
 
 class Policy(Protocol):

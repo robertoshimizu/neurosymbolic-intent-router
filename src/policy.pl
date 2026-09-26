@@ -8,7 +8,7 @@
       balance:       an exact rational
 */
 
-:- module(policy, [denials/3, permitted_message/2]).
+:- module(policy, [denials/3, permitted_message/2, suggestion/3]).
 
 action(wire_transfer_funds).
 action(view_account_balance).
@@ -38,16 +38,29 @@ denied(wire_transfer_funds, F, "transfer amount is missing or invalid") :-
 denied(wire_transfer_funds, F, "payee is not on the allowlist") :-
     get_dict(payee, F, @none).
 denied(wire_transfer_funds, F, "insufficient funds for the requested amount") :-
-    get_dict(amount, F, Amount),
-    number(Amount),
-    get_dict(balance, F, Balance),
-    Amount > Balance.
+    insufficient_funds(F).
 
 denied(view_account_balance, F, "caller is not authenticated") :-
     \+ authenticated(F).
 
 denied(delete_account, F, "delete requires an authenticated admin") :-
     \+ ( authenticated(F), get_dict(role, F, admin) ).
+
+%!  suggestion(+Action, +Facts, -Suggested) is semidet.
+%   A permitted action to offer after Action is denied. First match only.
+suggestion(Action, Facts, Suggested) :-
+    suggests(Action, Facts, Suggested),
+    denials(Suggested, Facts, []),
+    !.
+
+suggests(wire_transfer_funds, F, view_account_balance) :-
+    insufficient_funds(F).
+
+insufficient_funds(F) :-
+    get_dict(amount, F, Amount),
+    number(Amount),
+    get_dict(balance, F, Balance),
+    Amount > Balance.
 
 authenticated(F) :-
     get_dict(authenticated, F, @true).

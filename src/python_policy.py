@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from contracts import Policy, PolicyResult
-from policy import RULES, ParsedRequest, Session, denials
+from policy import RULES, ParsedRequest, Session, denials, suggestion
 
 
 class PythonPolicy(Policy):
@@ -16,5 +16,9 @@ class PythonPolicy(Policy):
     ) -> PolicyResult:
         reasons = denials(action, session, balance, parsed)
         if reasons:
-            return PolicyResult(allowed=False, reasons=reasons)
+            return PolicyResult(
+                allowed=False,
+                reasons=reasons,
+                suggestion=suggestion(action, session, balance, parsed),
+            )
         return PolicyResult(allowed=True, reasons=(RULES[action].permitted,))

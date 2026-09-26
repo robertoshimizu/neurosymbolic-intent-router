@@ -142,6 +142,29 @@ def denials(
     return tuple(reason for reason in reasons if reason is not None)
 
 
+# When `action` fails `check`, offer `suggested`, but only if the policy permits it.
+SUGGESTIONS: tuple[tuple[str, Check, str], ...] = (
+    ("wire_transfer_funds", require_funds, "view_account_balance"),
+)
+
+
+def suggestion(
+    action: str,
+    session: Session,
+    balance: Decimal,
+    parsed: ParsedRequest,
+) -> str | None:
+    """The first permitted action to offer after a denial, or None."""
+    for denied_action, check, suggested in SUGGESTIONS:
+        if (
+            action == denied_action
+            and check(session, balance, parsed) is not None
+            and not denials(suggested, session, balance, parsed)
+        ):
+            return suggested
+    return None
+
+
 def evaluate_action(
     action: str,
     session: Session,
