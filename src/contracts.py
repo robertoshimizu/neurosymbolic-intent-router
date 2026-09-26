@@ -41,6 +41,22 @@ class IntentRank:
 
 
 @dataclass(frozen=True)
+class Extraction:
+    """An extractor's reading of one request: amount and payee spans copied from its text. Not values; the rules convert them."""
+
+    text: str
+    amounts: tuple[str, ...]
+    payees: tuple[str, ...]
+    source: str
+
+    def __post_init__(self) -> None:
+        """A span the text does not contain was invented, not read; reject it before the rules see it."""
+        for span in (*self.amounts, *self.payees):
+            if not isinstance(span, str) or not span or span not in self.text:
+                raise ValueError(f"span {span!r} is not in the text")
+
+
+@dataclass(frozen=True)
 class DescriptionMatch:
     """Closeness of the utterance to the action descriptions.
 
@@ -78,6 +94,13 @@ class Splitter(Protocol):
 
     @abstractmethod
     def split(self, text: str) -> tuple[str, ...]: ...
+
+
+class Extractor(Protocol):
+    """Reads the amount and payee spans of one request. None means unavailable."""
+
+    @abstractmethod
+    def extract(self, text: str) -> Extraction | None: ...
 
 
 class Explainer(Protocol):

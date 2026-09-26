@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from statemachine import State, StateChart
 
-from contracts import Classifier, Explainer, Labeler, Policy, Splitter
+from contracts import Classifier, Explainer, Extractor, Labeler, Policy, Splitter
 from policy import Session
 from router import Decision, route
 from transfer import Ledger, WireTransfer, authorize_or_refuse
@@ -45,6 +45,7 @@ class RequestWorkflow(StateChart):
         classifier: Classifier | None = None,
         labeler: Labeler | None = None,
         splitter: Splitter | None = None,
+        extractor: Extractor | None = None,
         explainer: Explainer | None = None,
     ) -> None:
         self.utterance = utterance
@@ -52,7 +53,10 @@ class RequestWorkflow(StateChart):
         self.ledger = ledger
         self.request_id = request_id
         self.policy = policy
-        self.roles = {"classifier": classifier, "labeler": labeler, "splitter": splitter, "explainer": explainer}
+        self.roles = {
+            "classifier": classifier, "labeler": labeler, "splitter": splitter,
+            "extractor": extractor, "explainer": explainer,
+        }
         self.decision: Decision | None = None
         self.note = ""
         self.path: list[str] = []
@@ -66,7 +70,7 @@ class RequestWorkflow(StateChart):
         self.decision = route(
             self.utterance, self.session, self.ledger,
             policy=self.policy, classifier=self.roles["classifier"], labeler=self.roles["labeler"],
-            splitter=self.roles["splitter"], explainer=self.roles["explainer"],
+            splitter=self.roles["splitter"], extractor=self.roles["extractor"], explainer=self.roles["explainer"],
         )
         self.send("routed")
 

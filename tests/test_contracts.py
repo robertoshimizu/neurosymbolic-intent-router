@@ -18,7 +18,7 @@ import typesafe_sdk
 from typesafe_sdk import ChoiceAnswer
 
 from adapters import medgemma
-from contracts import Classifier, Explainer, IntentRank, Labeler, RequestCount, Splitter
+from contracts import Classifier, Explainer, Extraction, IntentRank, Labeler, RequestCount, Splitter
 from adapters.medgemma import MedGemmaSplitter
 from adapters.jev import JevClassifier
 from adapters.minilm import ActionEmbedder, MiniLMExplainer
@@ -208,3 +208,19 @@ def test_explainer_flags_a_gap_below_its_floor(cosine: float, gap: bool) -> None
     assert match.chosen == "wire_transfer_funds"
     assert match.nearest == "wire_transfer_funds"
     assert match.description_gap is gap
+
+
+def test_extraction_keeps_spans_read_from_the_text() -> None:
+    text = "Send $500 to my external bank account."
+    extraction = Extraction(text=text, amounts=("$500",), payees=("external bank account",), source="fake")
+    assert extraction.amounts == ("$500",)
+
+
+@pytest.mark.parametrize(
+    ("amounts", "payees"),
+    [(("$5,000",), ()), ((), ("John Smith",)), (("",), ())],
+    ids=["invented-amount", "invented-payee", "empty-span"],
+)
+def test_extraction_rejects_a_span_not_in_the_text(amounts: tuple[str, ...], payees: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError):
+        Extraction(text="Send $500 to my external bank account.", amounts=amounts, payees=payees, source="fake")

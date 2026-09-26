@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Literal
 
-NONE_ACTION = "none"
+from text_to_num import text2num
 
-AMOUNT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
+NONE_ACTION = "none"
 
 Outcome = Literal["deny", "execute"]
 
@@ -32,19 +32,50 @@ class ParsedRequest:
     payee: str | None
 
 
-def parse_request(utterance: str, payee_allowlist: tuple[str, ...]) -> ParsedRequest:
-    """Extract a dollar amount and a registered payee label from the sentence."""
+# "$1,500", "$750.25", "1500 USD", "500 dollars": a whole figure with a dollar sign or word, nothing else.
+PLAIN_DOLLARS_RE = re.compile(
+    r"(?:\$\s*(?P<a>\d{1,3}(?:,\d{3})+|\d+)(?P<a_cents>\.\d{1,2})?(?:\s*(?:usd|dollars?|bucks))?"
+    r"|(?P<b>\d{1,3}(?:,\d{3})+|\d+)(?P<b_cents>\.\d{1,2})?\s*(?:usd|dollars?|bucks))"
+)
+DOLLAR_WORDS_RE = re.compile(r"\s+(?:usd|dollars?|bucks)$")
+
+
+def to_dollars(span: str) -> Decimal:
+    """Convert an extracted amount span to US dollars. Raises ValueError rather than guess.
+
+    Accepts a plain dollar figure ("$1,500", "750.25 dollars") or number words with an optional
+    dollar word ("one thousand, five hundred dollars"). Refuses scales and shorthand ("$1.5k",
+    "$1 thousand", "a thousand"), other currencies, and anything text2num cannot read in full.
+    """
+    text = " ".join(span.strip().lower().split())
+    plain = PLAIN_DOLLARS_RE.fullmatch(text)
+    if plain:
+        whole = plain.group("a") or plain.group("b")
+        cents = plain.group("a_cents") or plain.group("b_cents") or ""
+        return Decimal(whole.replace(",", "") + cents)
+    words = DOLLAR_WORDS_RE.sub("", text).replace(",", "")
+    try:
+        return Decimal(text2num(words, "en"))
+    except ValueError as exc:
+        raise ValueError(f"amount {span!r} is neither a plain dollar figure nor a number in words") from exc
+
+
+def to_request(
+    amounts: tuple[str, ...], payees: tuple[str, ...], payee_allowlist: tuple[str, ...]
+) -> ParsedRequest:
+    """Turn extracted spans into the facts the rules check. Anything but exactly one readable amount
+    and exactly one allowlisted payee leaves that fact empty, and the rules deny."""
     amount: Decimal | None = None
-    match = AMOUNT_RE.search(utterance)
-    if match:
-        amount = Decimal(match.group(1).replace(",", ""))
+    if len(amounts) == 1:
+        try:
+            amount = to_dollars(amounts[0])
+        except ValueError:
+            amount = None
 
     payee: str | None = None
-    lower = utterance.lower()
-    for label in payee_allowlist:
-        if label.lower() in lower:
-            payee = label
-            break
+    if len(payees) == 1:
+        wanted = payees[0].strip().lower()
+        payee = next((label for label in payee_allowlist if label.lower() == wanted), None)
 
     return ParsedRequest(amount=amount, payee=payee)
 
@@ -68,7 +99,7 @@ def require_amount(session: Session, balance: Decimal, parsed: ParsedRequest) ->
 
 
 def require_payee(session: Session, balance: Decimal, parsed: ParsedRequest) -> str | None:
-    return None if parsed.payee is not None else "payee is not on the allowlist"
+    return None if parsed.payee is not None else "payee is missing, ambiguous or not on the allowlist"
 
 
 def require_funds(session: Session, balance: Decimal, parsed: ParsedRequest) -> str | None:

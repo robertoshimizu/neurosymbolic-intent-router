@@ -5,14 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
-from contracts import Classifier, DescriptionMatch, Explainer, IntentRank, Labeler, Policy, PolicyResult, Splitter
+from contracts import (
+    Classifier,
+    DescriptionMatch,
+    Explainer,
+    Extractor,
+    IntentRank,
+    Labeler,
+    Policy,
+    PolicyResult,
+    Splitter,
+)
 from policy import (
     ACTION_CATALOG,
     NONE_ACTION,
     Outcome,
     ParsedRequest,
     Session,
-    parse_request,
+    to_request,
 )
 from transfer import Ledger
 
@@ -33,6 +43,8 @@ class Decision:
 
 
 POLICY_UNAVAILABLE = PolicyResult(allowed=False, reasons=("policy unavailable",))
+# No facts read: the rules deny anything that needs an amount or a payee.
+NOTHING_READ = ParsedRequest(amount=None, payee=None)
 
 
 def _evaluate(
@@ -71,12 +83,24 @@ def _classify(utterance: str, classifier: Classifier | None) -> IntentRank | Non
         return None
 
 
-def _unavailable(utterance: str, session: Session) -> Decision:
+def _extract(text: str, session: Session, extractor: Extractor | None) -> tuple[ParsedRequest, str]:
+    """The extractor reads the spans; the rules turn them into facts. Unavailable means nothing is read."""
+    try:
+        extraction = extractor.extract(text) if extractor is not None else None
+    except Exception:
+        extraction = None
+    if extraction is None or extraction.text != text:
+        return NOTHING_READ, "extractor=unavailable"
+    parsed = to_request(extraction.amounts, extraction.payees, session.payee_allowlist)
+    return parsed, f"extracted amounts={list(extraction.amounts)} payees={list(extraction.payees)} source={extraction.source}"
+
+
+def _unavailable() -> Decision:
     return Decision(
         action=NONE_ACTION,
         outcome="deny",
         reason="classifier unavailable",
-        parsed=parse_request(utterance, session.payee_allowlist),
+        parsed=NOTHING_READ,
         scores={},
         permissions={},
         rule_trace=["classifier=unavailable", "abstain=before_policy"],
@@ -90,6 +114,7 @@ def decide(
     *,
     policy: Policy,
     classifier: Classifier | None = None,
+    extractor: Extractor | None = None,
     explainer: Explainer | None = None,
     rank: IntentRank | None = None,
 ) -> Decision:
@@ -101,7 +126,7 @@ def decide(
     """
     rank = rank or _classify(utterance, classifier)
     if rank is None:
-        return _unavailable(utterance, session)
+        return _unavailable()
     balance = ledger.get_balance(session.account_id)
     scores = rank.scores
 
@@ -110,7 +135,7 @@ def decide(
             action=NONE_ACTION,
             outcome="deny",
             reason="no matching action",
-            parsed=parse_request(utterance, session.payee_allowlist),
+            parsed=NOTHING_READ,
             scores=scores,
             permissions={},
             rule_trace=[
@@ -133,7 +158,7 @@ def decide(
     catalog_actions = [action for action in scores if action in ACTION_CATALOG]
     if top_action not in ACTION_CATALOG:
         catalog_actions = list(ACTION_CATALOG)
-    parsed = parse_request(utterance, session.payee_allowlist)
+    parsed, extracted = _extract(utterance, session, extractor)
     verdict = _evaluate(policy, top_action, session, balance, parsed)
     policy_reason = "; ".join(verdict.reasons)
     permissions, _reasons = evaluate_permissions(
@@ -144,6 +169,7 @@ def decide(
         f"source={rank.source}",
         f"top_raw_intent={top_action} confidence={rank.confidence:.4f}",
         f"balance={balance}",
+        extracted,
         f"parsed_amount={parsed.amount}",
         f"parsed_payee={parsed.payee}",
         f"policy[{top_action}]={policy_reason}",
@@ -191,12 +217,12 @@ def decide(
     return _decision("execute", policy_reason)
 
 
-def _deny_split(utterance: str, session: Session, reason: str, trace: list[str]) -> Decision:
+def _deny_split(reason: str, trace: list[str]) -> Decision:
     return Decision(
         action=NONE_ACTION,
         outcome="deny",
         reason=reason,
-        parsed=parse_request(utterance, session.payee_allowlist),
+        parsed=NOTHING_READ,
         scores={},
         permissions={},
         rule_trace=["request_count=several", *trace],
@@ -212,6 +238,7 @@ def route(
     classifier: Classifier | None = None,
     labeler: Labeler | None = None,
     splitter: Splitter | None = None,
+    extractor: Extractor | None = None,
     explainer: Explainer | None = None,
 ) -> Decision:
     """One classifier call. Several requests: the splitter separates them, the labeler labels them in one call,
@@ -220,23 +247,23 @@ def route(
     """
     rank = _classify(utterance, classifier)
     if rank is None:
-        return _unavailable(utterance, session)
+        return _unavailable()
     if rank.request_count != "several":
-        return decide(utterance, session, ledger, policy=policy, explainer=explainer, rank=rank)
+        return decide(utterance, session, ledger, policy=policy, extractor=extractor, explainer=explainer, rank=rank)
 
     try:
         requests = splitter.split(utterance) if splitter is not None else ()
     except Exception:
         requests = ()
     if len(requests) < 2:
-        return _deny_split(utterance, session, "several requests could not be separated", [f"split_count={len(requests)}"])
+        return _deny_split("several requests could not be separated", [f"split_count={len(requests)}"])
 
     try:
         ranks = labeler.label(requests) if labeler is not None else None
     except Exception:
         ranks = None
     if ranks is None or len(ranks) != len(requests):
-        return _deny_split(utterance, session, "several requests could not be labeled", [f"split_count={len(requests)}"])
+        return _deny_split("several requests could not be labeled", [f"split_count={len(requests)}"])
 
     labels = [r.action for r in ranks]
     try:
@@ -245,10 +272,10 @@ def route(
         ordered = []
     if sorted(ordered) != list(range(len(requests))):
         # The reasoner must return each position once; anything else is not an order.
-        return _deny_split(utterance, session, "several requests could not be ordered", [f"split_count={len(requests)}"])
+        return _deny_split("several requests could not be ordered", [f"split_count={len(requests)}"])
     head = ordered[0]
     first = decide(requests[head], session, ledger,
-                   policy=policy, explainer=explainer, rank=ranks[head])
+                   policy=policy, extractor=extractor, explainer=explainer, rank=ranks[head])
     trace = [
         "request_count=several",
         *(f"split[{i}]={requests[i]!r} label={labels[i]} confidence={ranks[i].confidence:.4f}" for i in range(len(requests))),

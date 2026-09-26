@@ -41,7 +41,7 @@ denied(wire_transfer_funds, R, "account is not active") :-
     \+ account_status(R, active).
 denied(wire_transfer_funds, R, "transfer amount is missing or invalid") :-
     \+ positive_amount(R).
-denied(wire_transfer_funds, R, "payee is not on the allowlist") :-
+denied(wire_transfer_funds, R, "payee is missing, ambiguous or not on the allowlist") :-
     \+ payee(R, _).
 denied(wire_transfer_funds, R, "insufficient funds for the requested amount") :-
     insufficient_funds(R).

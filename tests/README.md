@@ -1,15 +1,22 @@
 # Tests
 
-`uv run pytest -m "not integration and not prolog"` runs the unit tests, including pyright, so one command checks both the contracts' signatures and their meaning. Integration tests call MiniLM, Jev, or MedGemma. To check a new adapter, add it to the role's fixture in `test_contracts.py`. Router tests use a fake classifier, splitter and explainer, so they check the router's rules, not the models' judgment.
+`uv run pytest -m "not integration and not prolog"` runs the unit tests, including pyright, so one command checks both the contracts' signatures and their meaning. Integration tests call MiniLM, Jev, or MedGemma. To check a new adapter, add it to the role's fixture in `test_contracts.py`. Router tests use a fake classifier, splitter, extractor and explainer, so they check the router's rules, not the models' judgment.
 
 | Test | Goal | Type |
 |---|---|---|
 | `test_policy.py` | | |
-| parse_amount_with_comma_and_dollar | "$5,000" parses to 5000 and the payee binds | unit |
+| to_dollars_reads_plain_figures_and_number_words (11 spans) | "$1,500", "500 USD", "one thousand, five hundred dollars" and the like convert exactly | unit |
+| to_dollars_raises_instead_of_guessing (11 spans) | "$1.5k", "$1 thousand", "a thousand", "€200", "500" and the like raise | unit |
+| to_request_reads_one_amount_and_one_allowlisted_payee | One readable amount and one allowlisted payee become the facts | unit |
+| to_request_leaves_the_amount_empty_unless_one_is_readable (4) | No amount, two, shorthand or unreadable: no amount fact | unit |
+| to_request_leaves_the_payee_empty_unless_one_is_allowlisted (4) | No payee, source and destination, not allowlisted or paraphrased: no payee fact | unit |
+| unreadable_amount_is_denied_with_a_reason | "$1.5k" is denied with "transfer amount is missing or invalid" | unit |
 | unknown_payee_does_not_bind | A payee outside the allowlist does not bind | unit |
 | unauthenticated_wire_denied | An unauthenticated user cannot wire | unit |
 | delete_denied_for_customer | Only an admin may delete | unit |
 | `test_router.py` | | |
+| wire_is_denied_when_nothing_can_be_read (unavailable, raises, other text) | An extractor that is down, fails or reads another text leaves no amount; the wire is denied | unit |
+| wire_with_two_amounts_is_denied | Two amount spans in one request: denied, never the first | unit |
 | insufficient_funds_suggests_balance_view | A wire above the balance is denied and suggests the balance view | unit |
 | no_suggestion_the_policy_would_deny | An unauthenticated caller with no funds is not offered the balance view | unit |
 | authorize_then_settle_debits_once | Settlement debits once per transfer id | unit |
@@ -42,6 +49,8 @@
 | disk_cached_actions_do_not_load_model | Cached action vectors skip the model | unit |
 | minilm_agrees_with_wire_for_canonical_sentence | Real MiniLM agrees with the wire and shows no gap | integration |
 | `test_contracts.py` | | |
+| extraction_keeps_spans_read_from_the_text | Spans found in the text are kept | unit |
+| extraction_rejects_a_span_not_in_the_text (3) | An invented amount or payee, or an empty span, is rejected | unit |
 | pyright_reports_no_errors | Every adapter and fake matches its role's signatures; runs pyright | unit |
 | intent_rank_rejects_values_outside_the_contract (5 cases) | Unknown action, confidence above 1 or NaN, unknown count, text score: all rejected | unit |
 | off_contract_answer_counts_as_unavailable | A confident answer outside the catalog makes the classifier unavailable | unit |

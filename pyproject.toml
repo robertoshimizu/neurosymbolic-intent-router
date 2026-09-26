@@ -8,6 +8,7 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "python-statemachine>=3.2.1",
     "sentence-transformers>=5.7.0,<6",
+    "text2num>=3.1.0",
     "typesafe-sdk>=0.7.1",
 ]
 

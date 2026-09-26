@@ -11,13 +11,26 @@ the result. Nothing in src/ uses this file.
 from __future__ import annotations
 
 import os
+import re
 import time
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
-from policy import parse_request
+from policy import ParsedRequest
 from sentences import ALLOWLIST, CASES, Case
+
+# The regex parser src/policy.py used before the extractor replaced it: the baseline this experiment measured.
+AMOUNT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
+
+
+def parse_request(utterance: str, payee_allowlist: tuple[str, ...]) -> ParsedRequest:
+    match = AMOUNT_RE.search(utterance)
+    amount = Decimal(match.group(1).replace(",", "")) if match else None
+    lower = utterance.lower()
+    payee = next((label for label in payee_allowlist if label.lower() in lower), None)
+    return ParsedRequest(amount=amount, payee=payee)
 
 pytestmark = pytest.mark.gliner
 

@@ -11,7 +11,17 @@ from typing import NoReturn
 import numpy as np
 import pytest
 
-from contracts import Classifier, DescriptionMatch, Explainer, IntentRank, Labeler, RequestCount, Splitter
+from contracts import (
+    Classifier,
+    DescriptionMatch,
+    Explainer,
+    Extraction,
+    Extractor,
+    IntentRank,
+    Labeler,
+    RequestCount,
+    Splitter,
+)
 from adapters.jev import JevClassifier
 from adapters.minilm import ActionEmbedder, MiniLMExplainer
 from policy import ACTION_CATALOG
@@ -33,6 +43,21 @@ def _orthonormal_catalog() -> dict[str, np.ndarray]:
 
 WIRE_UTTERANCE = "I want to send $5,000 to my external bank account."
 POLICY = PythonPolicy()
+
+
+class _SpanExtractor(Extractor):
+    """Fake extractor: returns the known spans that occur in the text, in no particular order."""
+
+    AMOUNTS = ("$5,000", "$500")
+    PAYEES = ("external bank account",)
+
+    def extract(self, text: str) -> Extraction | None:
+        return Extraction(
+            text=text,
+            amounts=tuple(span for span in self.AMOUNTS if span in text),
+            payees=tuple(span for span in self.PAYEES if span in text),
+            source="fake",
+        )
 
 
 def _session(
@@ -67,6 +92,7 @@ def _decide_wire(session: Session, ledger: Ledger) -> Decision:
         ledger,
         policy=POLICY,
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.9)),
+        extractor=_SpanExtractor(),
     )
 
 
@@ -186,6 +212,7 @@ def test_jev_none_stops_before_policy() -> None:
         _ledger(Decimal("10000")),
         policy=POLICY,
         classifier=_classifier(_jev_rank("none", 0.91)),
+        extractor=_SpanExtractor(),
     )
     assert decision.outcome == "deny"
     assert decision.reason == "no matching action"
@@ -201,6 +228,7 @@ def test_jev_wire_is_judged_by_policy() -> None:
         _ledger(Decimal("10000")),
         policy=POLICY,
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
+        extractor=_SpanExtractor(),
     )
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "execute"
@@ -217,6 +245,7 @@ def test_minilm_disagreement_does_not_override_jev() -> None:
         policy=POLICY,
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
         explainer=MiniLMExplainer(_FixedEmbedder(faq_query, _orthonormal_catalog())),
+        extractor=_SpanExtractor(),
     )
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "execute"
@@ -239,6 +268,7 @@ def test_explainer_failure_keeps_the_decision() -> None:
         policy=POLICY,
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
         explainer=_BrokenExplainer(),
+        extractor=_SpanExtractor(),
     )
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "execute"
@@ -256,6 +286,7 @@ def test_classifier_failure_denies_without_guessing() -> None:
         _ledger(Decimal("10000")),
         policy=POLICY,
         classifier=_FakeClassifier(_boom),
+        extractor=_SpanExtractor(),
     )
     assert decision.action == "none"
     assert decision.outcome == "deny"
@@ -272,6 +303,7 @@ def test_live_jev_abstains_on_unrelated_sentence() -> None:
         _ledger(Decimal("10000")),
         policy=POLICY,
         classifier=JevClassifier(),
+        extractor=_SpanExtractor(),
     )
     assert decision.source == "jev"
     assert decision.reason == "no matching action"
@@ -300,6 +332,7 @@ def _route(
     return route(
         utterance, session, ledger, policy=POLICY,
         classifier=_classifier(rank), labeler=_FakeLabeler(labeler), splitter=_FakeSplitter(split),
+        extractor=_SpanExtractor(),
     )
 
 
@@ -372,3 +405,43 @@ def test_route_none_label_is_ordered_last() -> None:
     )
     assert decision.action == "wire_transfer_funds"
     assert decision.follow_ups == (BALANCE,)
+
+
+class _BrokenExtractor(Extractor):
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+
+    def extract(self, text: str) -> Extraction | None:
+        if self.mode == "raises":
+            raise RuntimeError("model failed to load")
+        if self.mode == "other-text":
+            return Extraction(text="Send $500.", amounts=("$500",), payees=(), source="fake")
+        return None
+
+
+@pytest.mark.parametrize("mode", ["unavailable", "raises", "other-text"])
+def test_wire_is_denied_when_nothing_can_be_read(mode: str) -> None:
+    decision = decide(
+        WIRE_UTTERANCE,
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        policy=POLICY,
+        classifier=_classifier(_jev_rank("wire_transfer_funds", 0.9)),
+        extractor=_BrokenExtractor(mode),
+    )
+    assert decision.outcome == "deny"
+    assert "amount is missing or invalid" in decision.reason
+    assert "extractor=unavailable" in decision.rule_trace
+
+
+def test_wire_with_two_amounts_is_denied() -> None:
+    decision = decide(
+        "I paid $500 yesterday; now send $5,000 to my external bank account.",
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        policy=POLICY,
+        classifier=_classifier(_jev_rank("wire_transfer_funds", 0.9)),
+        extractor=_SpanExtractor(),
+    )
+    assert decision.outcome == "deny"
+    assert "amount is missing or invalid" in decision.reason

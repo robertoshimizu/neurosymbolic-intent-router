@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from contracts import Classifier, IntentRank
+from contracts import Classifier, Extraction, Extractor, IntentRank
 from policy import Session
 from adapters.python_policy import PythonPolicy
 from transfer import Ledger
@@ -12,6 +12,21 @@ from workflow import RequestWorkflow
 
 WIRE_500 = "Send $500 to my external bank account."
 CLOSE = "Close this account."
+
+
+class _SpanExtractor(Extractor):
+    """Fake extractor: returns the known spans that occur in the text, in no particular order."""
+
+    AMOUNTS = ("$5,000", "$500")
+    PAYEES = ("external bank account",)
+
+    def extract(self, text: str) -> Extraction | None:
+        return Extraction(
+            text=text,
+            amounts=tuple(span for span in self.AMOUNTS if span in text),
+            payees=tuple(span for span in self.PAYEES if span in text),
+            source="fake",
+        )
 
 
 class _FixedClassifier(Classifier):
@@ -55,7 +70,9 @@ def _run(
     text: str, action: str | None, session: Session, ledger: Ledger,
     request_id: str = "r1", listener: object | None = None,
 ) -> RequestWorkflow:
-    workflow = RequestWorkflow(text, session, ledger, request_id, policy=PythonPolicy(), classifier=_FixedClassifier(action))
+    workflow = RequestWorkflow(text, session, ledger, request_id, policy=PythonPolicy(), classifier=_FixedClassifier(action),
+        extractor=_SpanExtractor(),
+    )
     if listener is not None:
         workflow.add_listener(listener)
     workflow.send("start")
