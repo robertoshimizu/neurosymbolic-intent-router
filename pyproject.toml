@@ -3,11 +3,14 @@ name = "neurosymbolic-intent-router"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "gliner2[local]>=2.0.0",
     "janus-swi>=1.5.3",
     "numpy>=2.4.6",
+    "protobuf>=7.36.2",
     "python-dotenv>=1.2.3",
     "python-statemachine>=3.2.1",
     "sentence-transformers>=5.7.0,<6",
+    "sentencepiece>=0.2.2",
     "text2num>=3.1.0",
     "typesafe-sdk>=0.7.1",
 ]
@@ -18,11 +21,8 @@ dev = [
     "pytest>=9.1.1",
 ]
 experiments = [
-    "gliner2[local]>=2.0.0",
     "instructor>=1.17.0",
     "openai>=3.3.0",
-    "protobuf>=7.36.2",
-    "sentencepiece>=0.2.2",
 ]
 
 [tool.pytest.ini_options]
@@ -31,7 +31,7 @@ testpaths = ["tests"]
 markers = [
     "integration: loads the sentence-transformers MiniLM model",
     "ollama: structured-output experiment against a local Ollama model (slow)",
-    "gliner: GLiNER2.5 extraction experiment; needs uv run --group experiments",
+    "gliner: loads the GLiNER2.5 model (about 20 s on first load)",
     "prolog: needs SWI-Prolog; run with uv run --env-file .env",
 ]
 
@@ -42,3 +42,6 @@ pythonVersion = "3.11"
 typeCheckingMode = "standard"
 venvPath = "."
 venv = ".venv"
+
+[tool.uv]
+default-groups = ["dev", "experiments"]

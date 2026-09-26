@@ -1,4 +1,4 @@
-"""Demo entry point: wires Jev, MedGemma, MiniLM and a policy reasoner into the router and runs three sessions.
+"""Demo entry point: wires Jev, MedGemma, GLiNER, MiniLM and a policy reasoner into the router and runs three sessions.
 
     uv run --env-file .env python src/demo.py [--policy prolog|python]
 """
@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from decimal import Decimal
 
+from adapters.gliner import GLiNERExtractor
 from adapters.medgemma import MedGemmaSplitter
 from adapters.jev import JevClassifier
 from adapters.minilm import MiniLMExplainer
@@ -136,13 +137,15 @@ if __name__ == "__main__":
     classifier = JevClassifier()
     explainer = MiniLMExplainer()
     splitter = MedGemmaSplitter()
+    extractor = GLiNERExtractor()
 
     for key in ("unauthenticated", "zero", "funded"):
         session = sessions[key]
         balance = ledger.get_balance(session.account_id)
         workflow = RequestWorkflow(
             utterance, session, ledger, request_id=f"request-{key}",
-            policy=policy, classifier=classifier, labeler=classifier, splitter=splitter, explainer=explainer,
+            policy=policy, classifier=classifier, labeler=classifier, splitter=splitter,
+            extractor=extractor, explainer=explainer,
         )
         workflow.send("start")
         print(f"\n--- Session '{key}' (balance=${balance}) ---")
