@@ -1,4 +1,4 @@
-"""Neuro-symbolic action router: Classifier ranking, MiniLM fallback, session policy."""
+"""Neuro-symbolic action router: a Classifier picks the action, policy judges it."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Protocol
 
-import numpy as np
 from dotenv import load_dotenv
 
 from intent_understanding import split_requests
@@ -25,14 +24,6 @@ from policy import (
 )
 from transfer import Ledger, WireTransfer, confirm_or_refuse
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-# Hub download cache (safetensors live here after the first fetch).
-MODEL_CACHE_DIR = Path(__file__).resolve(
-).parents[1] / ".cache" / "sentence-transformers"
-# Persistent embedding vectors so CLI runs can skip loading weights into RAM.
-EMBEDDING_CACHE_DIR = Path(__file__).resolve(
-).parents[1] / ".cache" / "embeddings"
-_MODEL_CACHE: dict[str, object] = {}
 _ENV_LOADED = False
 
 
@@ -47,14 +38,13 @@ def _load_env() -> None:
 
 
 _load_env()
-MIN_SCORE = 0.45
-MIN_MARGIN = 0.08
+
 
 @dataclass(frozen=True)
 class DescriptionMatch:
-    """MiniLM closeness of the utterance to the action descriptions.
+    """Closeness of the utterance to the action descriptions.
 
-    Jev still chooses the action. This only explains that choice.
+    The classifier still chooses the action. This only explains that choice.
     """
 
     chosen: str
@@ -62,14 +52,11 @@ class DescriptionMatch:
     nearest_cosine: float
     chosen_cosine: float
     similarities: dict[str, float]
+    description_gap: bool
 
     @property
     def agrees(self) -> bool:
         return self.nearest == self.chosen
-
-    @property
-    def description_gap(self) -> bool:
-        return (not self.agrees) or self.chosen_cosine < MIN_SCORE
 
 
 @dataclass(frozen=True)
@@ -102,169 +89,6 @@ def evaluate_permissions(
     return permissions, reasons
 
 
-def cosine_scores(
-    query_vector: np.ndarray, action_embeddings: dict[str, np.ndarray]
-) -> dict[str, float]:
-    query_norm = query_vector / np.linalg.norm(query_vector)
-    scores: dict[str, float] = {}
-    for action_id, action_vec in action_embeddings.items():
-        action_norm = action_vec / np.linalg.norm(action_vec)
-        scores[action_id] = float(np.dot(query_norm, action_norm))
-    return scores
-
-
-def _catalog_fingerprint(model_name: str, catalog: dict[str, str]) -> str:
-    import hashlib
-    import json
-
-    payload = json.dumps(
-        {"model": model_name, "catalog": catalog},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
-def _query_fingerprint(model_name: str, text: str) -> str:
-    import hashlib
-
-    return hashlib.sha256(f"{model_name}\0{text}".encode()).hexdigest()
-
-
-class ActionEmbedder:
-    """MiniLM encoder with Hub weight cache and on-disk embedding cache.
-
-    Hugging Face weights already persist under MODEL_CACHE_DIR. Each new CLI
-    process still has to map those weights into RAM unless the needed vectors
-    are already saved under EMBEDDING_CACHE_DIR — in that case the model is
-    never loaded.
-    """
-
-    def __init__(
-        self,
-        model_name: str = MODEL_NAME,
-        cache_folder: Path | str | None = MODEL_CACHE_DIR,
-        embedding_cache_dir: Path | str | None = EMBEDDING_CACHE_DIR,
-        use_embedding_cache: bool = True,
-    ) -> None:
-        self.model_name = model_name
-        self.cache_folder = Path(
-            cache_folder) if cache_folder else MODEL_CACHE_DIR
-        self.embedding_cache_dir = (
-            Path(embedding_cache_dir) if embedding_cache_dir else EMBEDDING_CACHE_DIR
-        )
-        self.use_embedding_cache = use_embedding_cache
-        self._model = None
-        self._action_embeddings: dict[str, np.ndarray] | None = None
-
-    def _load_model(self):
-        if self._model is not None:
-            return self._model
-
-        cache_key = f"{self.model_name}|{self.cache_folder.resolve()}"
-        cached = _MODEL_CACHE.get(cache_key)
-        if cached is not None:
-            self._model = cached
-            return self._model
-
-        _load_env()
-        self.cache_folder.mkdir(parents=True, exist_ok=True)
-        from sentence_transformers import SentenceTransformer
-
-        print(
-            f"Loading MiniLM weights into memory from {self.cache_folder} "
-            "(one-time per process; embedding cache avoids this on repeat runs)...",
-            flush=True,
-        )
-        try:
-            self._model = SentenceTransformer(
-                self.model_name,
-                cache_folder=str(self.cache_folder),
-                local_files_only=True,
-            )
-        except OSError:
-            self._model = SentenceTransformer(
-                self.model_name,
-                cache_folder=str(self.cache_folder),
-                local_files_only=False,
-            )
-        _MODEL_CACHE[cache_key] = self._model
-        return self._model
-
-    def _query_cache_path(self, text: str) -> Path:
-        digest = _query_fingerprint(self.model_name, text)
-        return self.embedding_cache_dir / "queries" / f"{digest}.npy"
-
-    def _action_cache_paths(
-        self, catalog: dict[str, str]
-    ) -> tuple[Path, Path]:
-        digest = _catalog_fingerprint(self.model_name, catalog)
-        base = self.embedding_cache_dir / "actions" / digest
-        return base.with_suffix(".npz"), base.with_suffix(".json")
-
-    def embed(self, text: str) -> np.ndarray:
-        if self.use_embedding_cache:
-            path = self._query_cache_path(text)
-            if path.exists():
-                return np.asarray(np.load(path), dtype=np.float64)
-
-        vector = np.asarray(
-            self._load_model().encode(text, normalize_embeddings=True),
-            dtype=np.float64,
-        )
-        if self.use_embedding_cache:
-            path = self._query_cache_path(text)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(path, vector)
-        return vector
-
-    def action_embeddings(
-        self, catalog: dict[str, str] | None = None
-    ) -> dict[str, np.ndarray]:
-        catalog = catalog or ACTION_CATALOG
-        if self._action_embeddings is not None:
-            return self._action_embeddings
-
-        if self.use_embedding_cache:
-            npz_path, meta_path = self._action_cache_paths(catalog)
-            if npz_path.exists() and meta_path.exists():
-                import json
-
-                meta = json.loads(meta_path.read_text())
-                if meta.get("model") == self.model_name and set(
-                    meta.get("actions", [])
-                ) == set(catalog):
-                    loaded = np.load(npz_path)
-                    self._action_embeddings = {
-                        action_id: np.asarray(
-                            loaded[action_id], dtype=np.float64)
-                        for action_id in catalog
-                    }
-                    return self._action_embeddings
-
-        self._action_embeddings = {
-            action_id: self.embed(description)
-            for action_id, description in catalog.items()
-        }
-
-        if self.use_embedding_cache:
-            import json
-
-            npz_path, meta_path = self._action_cache_paths(catalog)
-            npz_path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(npz_path, **self._action_embeddings)
-            meta_path.write_text(
-                json.dumps(
-                    {
-                        "model": self.model_name,
-                        "actions": list(catalog.keys()),
-                    },
-                    indent=2,
-                )
-            )
-        return self._action_embeddings
-
-
 @dataclass(frozen=True)
 class IntentRank:
     """System 1 proposal. Policy has not run yet."""
@@ -273,7 +97,6 @@ class IntentRank:
     scores: dict[str, float]
     confidence: float
     source: Literal["jev", "minilm"]
-    runner_up: float = 0.0
     request_count: str | None = None
 
 
@@ -285,78 +108,31 @@ class Classifier(Protocol):
     def label(self, texts: tuple[str, ...]) -> list[IntentRank] | None: ...
 
 
-def _rank_minilm(
-    query_vector: np.ndarray, action_embeddings: dict[str, np.ndarray]
-) -> IntentRank:
-    scores = cosine_scores(query_vector, action_embeddings)
-    ranked = sorted(scores, key=scores.get, reverse=True)
-    top_action = ranked[0]
-    runner_up = scores[ranked[1]] if len(ranked) > 1 else 0.0
-    return IntentRank(
-        action=top_action,
-        scores=scores,
-        confidence=scores[top_action],
-        source="minilm",
-        runner_up=runner_up,
-    )
+class Explainer(Protocol):
+    """Display-only note on a chosen action. Never changes the decision."""
+
+    def explain(self, text: str, action: str) -> DescriptionMatch | None: ...
 
 
-def _rank_minilm_from_text(utterance: str, embedder: ActionEmbedder | None) -> IntentRank:
-    embedder = embedder or ActionEmbedder()
-    return _rank_minilm(embedder.embed(utterance), embedder.action_embeddings())
-
-
-def _select_rank(
-    utterance: str,
-    *,
-    classifier: Classifier | None,
-    query_vector: np.ndarray | None,
-    action_embeddings: dict[str, np.ndarray] | None,
-    embedder: ActionEmbedder | None,
-) -> IntentRank:
-    """The classifier first. MiniLM when there is none, or it is unavailable."""
-    injected = query_vector is not None and action_embeddings is not None
-
-    def minilm() -> IntentRank:
-        if injected:
-            return _rank_minilm(query_vector, action_embeddings)
-        return _rank_minilm_from_text(utterance, embedder)
-
+def _classify(utterance: str, classifier: Classifier | None) -> IntentRank | None:
+    """None when there is no classifier or it is unavailable. Nothing guesses in its place."""
     if classifier is None:
-        return minilm()
-    try:
-        rank = classifier.classify(utterance)
-    except Exception:
-        rank = None
-    if rank is None:
-        print("Classifier unavailable; using MiniLM fallback.", flush=True)
-        return minilm()
-    return rank
-
-
-def _explain_with_minilm(
-    utterance: str,
-    chosen_action: str,
-    *,
-    classifier: Classifier | None,
-    query_vector: np.ndarray | None,
-    action_embeddings: dict[str, np.ndarray] | None,
-    embedder: ActionEmbedder | None,
-) -> DescriptionMatch | None:
-    """Cosines for a committed Jev label. Fake classifiers skip the model unless vectors are injected."""
-    injected = query_vector is not None and action_embeddings is not None
-    if injected:
-        similarity = _rank_minilm(query_vector, action_embeddings)
-    elif classifier is None:
-        similarity = _rank_minilm_from_text(utterance, embedder)
-    else:
         return None
-    return DescriptionMatch(
-        chosen=chosen_action,
-        nearest=similarity.action,
-        nearest_cosine=similarity.confidence,
-        chosen_cosine=float(similarity.scores.get(chosen_action, 0.0)),
-        similarities=similarity.scores,
+    try:
+        return classifier.classify(utterance)
+    except Exception:
+        return None
+
+
+def _unavailable(utterance: str, session: Session) -> Decision:
+    return Decision(
+        action=NONE_ACTION,
+        outcome="deny",
+        reason="classifier unavailable",
+        parsed=parse_request(utterance, session.payee_allowlist),
+        scores={},
+        permissions={},
+        rule_trace=["classifier=unavailable", "abstain=before_policy"],
     )
 
 
@@ -365,27 +141,19 @@ def decide(
     session: Session,
     ledger: Ledger,
     *,
-    query_vector: np.ndarray | None = None,
-    action_embeddings: dict[str, np.ndarray] | None = None,
-    embedder: ActionEmbedder | None = None,
     classifier: Classifier | None = None,
-    min_score: float = MIN_SCORE,
-    min_margin: float = MIN_MARGIN,
+    explainer: Explainer | None = None,
     rank: IntentRank | None = None,
 ) -> Decision:
-    """Rank the utterance, judge the top raw intent, and return a Decision.
+    """Classify the utterance, judge the action, and return a Decision.
 
-    A `none` action stops before policy. A denied
+    No classifier answer, or a `none` action, stops before policy. A denied
     catalog intent stays denied and is never replaced by FAQ. A precomputed
-    `rank` skips ranking.
+    `rank` skips classifying.
     """
-    rank = rank or _select_rank(
-        utterance,
-        classifier=classifier,
-        query_vector=query_vector,
-        action_embeddings=action_embeddings,
-        embedder=embedder,
-    )
+    rank = rank or _classify(utterance, classifier)
+    if rank is None:
+        return _unavailable(utterance, session)
     balance = ledger.get_balance(session.account_id)
     scores = rank.scores
 
@@ -406,15 +174,8 @@ def decide(
 
     top_action = rank.action
     description_match = None
-    if rank.source == "jev" and top_action in ACTION_CATALOG:
-        description_match = _explain_with_minilm(
-            utterance,
-            top_action,
-            classifier=classifier,
-            query_vector=query_vector,
-            action_embeddings=action_embeddings,
-            embedder=embedder,
-        )
+    if explainer is not None and top_action in ACTION_CATALOG:
+        description_match = explainer.explain(utterance, top_action)
 
     catalog_actions = [action for action in scores if action in ACTION_CATALOG]
     if top_action not in ACTION_CATALOG:
@@ -429,7 +190,6 @@ def decide(
     rule_trace = [
         f"source={rank.source}",
         f"top_raw_intent={top_action} confidence={rank.confidence:.4f}",
-        f"runner_up_score={rank.runner_up:.4f}",
         f"balance={balance}",
         f"parsed_amount={parsed.amount}",
         f"parsed_payee={parsed.payee}",
@@ -473,24 +233,6 @@ def decide(
     if verdict.outcome == "deny":
         return _decision("deny", policy_reason, suggestion=verdict.suggestion)
 
-    if rank.source == "minilm" and rank.confidence < min_score:
-        return _decision(
-            "deny",
-            "similarity below minimum confidence",
-            trace_extra=["confidence=below_min_score"],
-        )
-
-    if (
-        rank.source == "minilm"
-        and len(rank.scores) > 1
-        and (rank.confidence - rank.runner_up) < min_margin
-    ):
-        return _decision(
-            "deny",
-            "ambiguous intent: margin below minimum",
-            trace_extra=["confidence=below_min_margin"],
-        )
-
     if verdict.outcome == "needs_confirmation":
         return _decision(
             "needs_confirmation",
@@ -529,13 +271,9 @@ def route(
     Never mutates the ledger.
     """
     classifier = decide_kwargs.get("classifier")
-    rank = _select_rank(
-        utterance,
-        classifier=classifier,
-        query_vector=decide_kwargs.get("query_vector"),
-        action_embeddings=decide_kwargs.get("action_embeddings"),
-        embedder=decide_kwargs.get("embedder"),
-    )
+    rank = _classify(utterance, classifier)
+    if rank is None:
+        return _unavailable(utterance, session)
     if rank.request_count != "several":
         return decide(utterance, session, ledger, rank=rank, **decide_kwargs)
 
@@ -666,16 +404,17 @@ def build_demo_world() -> tuple[dict[str, Session], Ledger]:
 
 if __name__ == "__main__":
     from jev import JevClassifier
+    from minilm import MiniLMExplainer
 
     utterance = "Close this account and send $500 to my external bank account."
     sessions, ledger = build_demo_world()
-    embedder = ActionEmbedder()
     classifier = JevClassifier()
+    explainer = MiniLMExplainer()
 
     for key in ("guest", "zero", "funded"):
         session = sessions[key]
         decision = route(utterance, session, ledger,
-                         classifier=classifier, embedder=embedder)
+                         classifier=classifier, explainer=explainer)
         balance = ledger.get_balance(session.account_id)
         print(f"\n--- Session '{key}' (balance=${balance}) ---")
         print_decision(utterance, session, decision)

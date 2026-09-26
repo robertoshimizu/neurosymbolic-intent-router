@@ -12,13 +12,13 @@ import pytest
 
 from hybrid import (
     ACTION_CATALOG,
-    ActionEmbedder,
     Decision,
     IntentRank,
     decide,
     route,
 )
 from jev import JevClassifier
+from minilm import MiniLMExplainer
 from policy import Session
 from transfer import Ledger, WireTransfer, confirm_or_refuse
 
@@ -33,8 +33,6 @@ def _orthonormal_catalog() -> dict[str, np.ndarray]:
     }
 
 
-WIRE_QUERY = np.array([0.98, 0.10, 0.05, 0.02])
-AMBIGUOUS_QUERY = np.array([0.70, 0.69, 0.0, 0.0])
 WIRE_UTTERANCE = "I want to send $5,000 to my external bank account."
 
 
@@ -63,20 +61,12 @@ def _ledger(balance: Decimal, account_id: str = "acct") -> Ledger:
     return ledger
 
 
-def _decide_wire(
-    session: Session,
-    ledger: Ledger,
-    *,
-    query_vector: np.ndarray = WIRE_QUERY,
-    **kwargs,
-) -> Decision:
+def _decide_wire(session: Session, ledger: Ledger) -> Decision:
     return decide(
         WIRE_UTTERANCE,
         session,
         ledger,
-        query_vector=query_vector,
-        action_embeddings=_orthonormal_catalog(),
-        **kwargs,
+        classifier=_classifier(_jev_rank("wire_transfer_funds", 0.9)),
     )
 
 
@@ -86,32 +76,6 @@ def test_insufficient_funds_suggests_balance_view() -> None:
     assert decision.outcome == "deny"
     assert "insufficient funds" in decision.reason
     assert decision.suggestion == "view_account_balance"
-
-
-def test_ambiguous_margin_denied() -> None:
-    session = _session("funded")
-    decision = _decide_wire(
-        session,
-        _ledger(Decimal("10000")),
-        query_vector=AMBIGUOUS_QUERY,
-        min_margin=0.08,
-    )
-    assert decision.outcome == "deny"
-    assert "ambiguous" in decision.reason
-
-
-def test_minilm_far_from_every_action_denied() -> None:
-    # Nearest action is the always-allowed FAQ at cosine ~0.33, below MIN_SCORE.
-    decision = decide(
-        "Tell me a joke.",
-        _session("funded"),
-        _ledger(Decimal("10000")),
-        query_vector=np.array([-0.5, -0.5, -0.5, 0.3]),
-        action_embeddings=_orthonormal_catalog(),
-    )
-    assert decision.action == "view_public_faq"
-    assert decision.outcome == "deny"
-    assert decision.reason == "similarity below minimum confidence"
 
 
 def test_confirm_then_settle_debits_once() -> None:
@@ -148,54 +112,6 @@ def test_confirm_refused_when_balance_drained() -> None:
     assert confirm_or_refuse(transfer) is False
     assert transfer.awaiting_confirmation.is_active
     assert ledger.get_balance("acct") == Decimal("0")
-
-
-@pytest.mark.integration
-def test_minilm_ranks_wire_highest_for_canonical_sentence() -> None:
-    embedder = ActionEmbedder()
-    query = embedder.embed(WIRE_UTTERANCE)
-    action_vecs = embedder.action_embeddings(ACTION_CATALOG)
-    from hybrid import cosine_scores
-
-    scores = cosine_scores(query, action_vecs)
-    top = max(scores, key=scores.get)
-    assert top == "wire_transfer_funds"
-    ranked = sorted(scores.values(), reverse=True)
-    assert ranked[0] - ranked[1] >= 0.08 or ranked[0] >= 0.45
-
-
-def test_disk_cached_embed_does_not_load_model(tmp_path) -> None:
-    text = "cached utterance"
-    writer = ActionEmbedder(embedding_cache_dir=tmp_path)
-    path = writer._query_cache_path(text)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(path, np.array([1.0, 0.0, 0.0], dtype=np.float64))
-
-    reader = ActionEmbedder(embedding_cache_dir=tmp_path)
-    vector = reader.embed(text)
-    assert reader._model is None
-    np.testing.assert_array_equal(vector, [1.0, 0.0, 0.0])
-
-
-def test_disk_cached_actions_do_not_load_model(tmp_path) -> None:
-    catalog = {"wire_transfer_funds": "Send money", "view_public_faq": "FAQ"}
-    writer = ActionEmbedder(embedding_cache_dir=tmp_path)
-    npz_path, meta_path = writer._action_cache_paths(catalog)
-    npz_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(
-        npz_path,
-        wire_transfer_funds=np.array([1.0, 0.0], dtype=np.float64),
-        view_public_faq=np.array([0.0, 1.0], dtype=np.float64),
-    )
-    meta_path.write_text(
-        '{"model": "%s", "actions": ["wire_transfer_funds", "view_public_faq"]}'
-        % writer.model_name
-    )
-
-    reader = ActionEmbedder(embedding_cache_dir=tmp_path)
-    vectors = reader.action_embeddings(catalog)
-    assert reader._model is None
-    assert set(vectors) == set(catalog)
 
 
 def _never(*_args) -> None:
@@ -251,9 +167,9 @@ def test_minilm_disagreement_does_not_override_jev() -> None:
         WIRE_UTTERANCE,
         _session("funded"),
         _ledger(Decimal("10000")),
-        query_vector=faq_query,
-        action_embeddings=_orthonormal_catalog(),
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
+        explainer=MiniLMExplainer(SimpleNamespace(
+            embed=lambda _text: faq_query, action_embeddings=_orthonormal_catalog)),
     )
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "needs_confirmation"
@@ -264,18 +180,19 @@ def test_minilm_disagreement_does_not_override_jev() -> None:
     assert "description_gap=nearest_differs" in decision.rule_trace
 
 
-def test_jev_failure_falls_back_to_minilm() -> None:
+def test_classifier_failure_denies_without_guessing() -> None:
     def _boom(_utterance: str) -> IntentRank:
         raise RuntimeError("classifier down")
 
-    decision = _decide_wire(
+    decision = decide(
+        WIRE_UTTERANCE,
         _session("funded"),
         _ledger(Decimal("10000")),
         classifier=SimpleNamespace(classify=_boom, label=_never),
     )
-    assert decision.source == "minilm"
-    assert decision.action == "wire_transfer_funds"
-    assert decision.outcome == "needs_confirmation"
+    assert decision.action == "none"
+    assert decision.outcome == "deny"
+    assert decision.reason == "classifier unavailable"
 
 
 @pytest.mark.integration
