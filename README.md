@@ -62,7 +62,7 @@ In many agent designs the model chooses the next step. Here the model's output i
 - **Symbolic parts decide.**
   - Policy rules check the session and the ledger.
   - A fixed precedence rule orders multiple requests.
-  - Contract checks reject any model output outside the catalog or outside its expected shape.
+  - Contract checks reject classifier and labeler output outside the catalog or outside its expected shape.
 - **A state machine holds it all.** Every request goes through `RequestWorkflow`: `received` → `routing` → `refused` or `executing` → `completed` or `failed`. `routing` is one state in which the neural and symbolic parts work together (it runs `route()`), and the rules' decision is its only exit. While executing, a wire runs its own `WireTransfer` (drafted, authorized, submitted, settled), and a deletion closes the account in the ledger.
 
 The design fails closed. A sentence is denied when a model is unsure, unavailable, or answers outside its contract, and when an amount cannot be parsed. That is a deliberate cost to recall: for a bank, refusing and asking again costs less than acting wrongly.
@@ -91,7 +91,7 @@ Next steps:
 
 ## Architecture
 
-The router never names a model. `src/contracts.py` defines four roles as `Protocol`s, plus the types they exchange. It imports only the action catalog from `policy.py`, and `IntentRank` rejects any model value outside the contract (an action not in the catalog, a confidence outside 0..1, an unknown request count, a non-numeric score) before the router sees it. Each model is an adapter in its own file that explicitly subclasses the role it fulfils. `src/demo.py` is the composition root: it builds the adapters and hands them to `route()`. Swapping a model means writing a new adapter that subclasses the same roles and changing one line in `demo.py`.
+The router never names a model. `src/contracts.py` defines four roles as `Protocol`s, plus the types they exchange. It imports only the action catalog from `policy.py`, and `IntentRank` rejects any model value outside the contract (an action not in the catalog, a confidence outside 0..1, an unknown request count, a non-numeric score) before the router sees it. Each model is an adapter in its own file that explicitly subclasses the role it fulfils. `src/demo.py` is the composition root: it builds the adapters and hands them to `RequestWorkflow`, which runs `route()` in its `routing` state. Swapping a model means writing a new adapter that subclasses the same roles and changing one line in `demo.py`.
 
 | Role | Contract | Today | File |
 |---|---|---|---|
@@ -111,7 +111,7 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ demo.py        composition root: builds the adapters and passes them to  │
-│                route(). The only file that names models.                 │
+│                RequestWorkflow. The only file that names models.         │
 └────────┬───────────────────┬──────────────────────┬─────────────────┬────┘
          │ builds            │ builds               │ builds          │
          ▼                   ▼                      ▼                 │
@@ -130,7 +130,7 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 │                IntentRank · DescriptionMatch · RequestCount  │      │
 │                imports only the catalog from policy.py       │      │
 └──────────────────────────────▲───────────────────────────────┘      │
-                               │ imports the roles                    │ calls
+                               │ imports the roles                    │ calls, via workflow.py
                                │                                      ▼
 ┌──────────────────────────────┴───────────────────────────────────────────┐
 │ router.py      route() · decide() · Decision                             │
