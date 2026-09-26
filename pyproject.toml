@@ -25,6 +25,7 @@ testpaths = ["tests"]
 markers = [
     "integration: loads the sentence-transformers MiniLM model",
     "ollama: structured-output experiment against a local Ollama model (slow)",
+    "prolog: needs SWI-Prolog; run with uv run --env-file .env",
 ]
 
 [tool.pyright]
