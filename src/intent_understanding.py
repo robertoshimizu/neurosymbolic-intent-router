@@ -7,6 +7,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from contracts import Splitter
+
 SECTIONS = (
     "entities",
     "relationships",
@@ -80,7 +82,7 @@ def split_requests(
     return parse_split(content)
 
 
-class MedGemmaSplitter:
+class MedGemmaSplitter(Splitter):
     """The router's Splitter: MedGemma on local Ollama."""
 
     def __init__(

@@ -1,4 +1,4 @@
-"""Jev (TypeSafe system_one) as the router's Classifier."""
+"""Jev (TypeSafe system_one) as the router's Classifier and Labeler."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from dotenv import load_dotenv
+from typesafe_sdk import ChoiceAnswer
 
+from contracts import Classifier, IntentRank, Labeler, RequestCount
 from policy import ACTION_CATALOG, NONE_ACTION
-from router import IntentRank
 
 # TYPESAFE_API_KEY comes from the project .env, never from code.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
@@ -24,7 +25,7 @@ REQUEST_COUNT_CRITERIA = {
 }
 
 
-class JevClassifier:
+class JevClassifier(Classifier, Labeler):
     """Answers below min_confidence come back as `none`, so the router never sees Jev's scale."""
 
     def __init__(self, min_confidence: float = MIN_CONFIDENCE) -> None:
@@ -49,12 +50,12 @@ class JevClassifier:
         )
         if response is None:
             return None
-        count = response.answers["request_count"]
-        return replace(
-            self._to_rank(response.answers["action"]),
-            request_count=str(count.choice) if float(
-                count.confidence) >= self.min_confidence else None,
-        )
+        count = response["request_count"]
+        choice = count.choice
+        request_count: RequestCount | None = None
+        if float(count.confidence) >= self.min_confidence and choice in ("none", "one", "several"):
+            request_count = choice
+        return replace(self._to_rank(response["action"]), request_count=request_count)
 
     def label(self, texts: tuple[str, ...]) -> list[IntentRank] | None:
         """One call, one catalog question per text. None means unavailable."""
@@ -72,16 +73,19 @@ class JevClassifier:
         )
         if response is None:
             return None
-        return [self._to_rank(response.answers[f"request_{i}"]) for i in range(1, len(texts) + 1)]
+        return [self._to_rank(response[f"request_{i}"]) for i in range(1, len(texts) + 1)]
 
-    def _ask(self, state: str, questions: dict[str, tuple[str, dict[str, str]]]):
+    def _ask(
+        self, state: str, questions: dict[str, tuple[str, dict[str, str]]]
+    ) -> dict[str, ChoiceAnswer] | None:
+        """One system_one call. None means unavailable, including an answer that is not a choice."""
         if not os.environ.get("TYPESAFE_API_KEY"):
             return None
         try:
             from typesafe_sdk import Choice, TypeSafeClient
 
             with TypeSafeClient() as client:
-                return client.system_one(
+                response = client.system_one(
                     state=state,
                     questions={
                         name: Choice(instructions=instructions, criteria=criteria)
@@ -91,13 +95,15 @@ class JevClassifier:
         except Exception:
             print("Jev unavailable.", flush=True)
             return None
+        answers = {name: answer for name, answer in response.answers.items()
+                   if isinstance(answer, ChoiceAnswer)}
+        return answers if answers.keys() == questions.keys() else None
 
-    def _to_rank(self, answer) -> IntentRank:
-        confidence = float(answer.confidence)
+    def _to_rank(self, answer: ChoiceAnswer) -> IntentRank:
+        confidence = answer.confidence
         return IntentRank(
-            action=str(answer.choice) if confidence >= self.min_confidence else NONE_ACTION,
-            scores={str(label): float(prob)
-                    for label, prob in answer.probabilities.items()},
+            action=answer.choice if confidence >= self.min_confidence else NONE_ACTION,
+            scores=dict(answer.probabilities),
             confidence=confidence,
             source="jev",
         )

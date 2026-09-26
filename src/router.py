@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Protocol
 
 import policy
+from contracts import Classifier, DescriptionMatch, Explainer, IntentRank, Labeler, Splitter
 from policy import (
     ACTION_CATALOG,
     ACTION_PRECEDENCE,
@@ -18,24 +18,6 @@ from policy import (
     parse_request,
 )
 from transfer import Ledger
-
-@dataclass(frozen=True)
-class DescriptionMatch:
-    """Closeness of the utterance to the action descriptions.
-
-    The classifier still chooses the action. This only explains that choice.
-    """
-
-    chosen: str
-    nearest: str
-    nearest_score: float
-    chosen_score: float
-    similarities: dict[str, float]
-    description_gap: bool
-
-    @property
-    def agrees(self) -> bool:
-        return self.nearest == self.chosen
 
 
 @dataclass(frozen=True)
@@ -66,31 +48,6 @@ def evaluate_permissions(
         permissions[action] = allowed
         reasons[action] = reason
     return permissions, reasons
-
-
-@dataclass(frozen=True)
-class IntentRank:
-    """System 1 proposal. Policy has not run yet."""
-
-    action: str
-    scores: dict[str, float]
-    confidence: float
-    source: str
-    request_count: str | None = None
-
-
-class Classifier(Protocol):
-    """Picks catalog actions. Unsure answers come back as `none`; None means unavailable."""
-
-    def classify(self, text: str) -> IntentRank | None: ...
-
-    def label(self, texts: tuple[str, ...]) -> list[IntentRank] | None: ...
-
-
-class Explainer(Protocol):
-    """Display-only note on a chosen action. Never changes the decision."""
-
-    def explain(self, text: str, action: str) -> DescriptionMatch | None: ...
 
 
 def _classify(utterance: str, classifier: Classifier | None) -> IntentRank | None:
@@ -153,8 +110,13 @@ def decide(
 
     top_action = rank.action
     description_match = None
+    explainer_failed = False
     if explainer is not None and top_action in ACTION_CATALOG:
-        description_match = explainer.explain(utterance, top_action)
+        try:
+            description_match = explainer.explain(utterance, top_action)
+        except Exception:
+            # Display only: a broken explainer loses the note, never the decision.
+            explainer_failed = True
 
     catalog_actions = [action for action in scores if action in ACTION_CATALOG]
     if top_action not in ACTION_CATALOG:
@@ -174,6 +136,8 @@ def decide(
         f"parsed_payee={parsed.payee}",
         f"policy[{top_action}]={policy_reason}",
     ]
+    if explainer_failed:
+        rule_trace.append("explainer=unavailable")
     if description_match is not None:
         rule_trace.append(
             f"explainer_nearest={description_match.nearest} "
@@ -222,12 +186,6 @@ def decide(
     return _decision("execute", policy_reason)
 
 
-class Splitter(Protocol):
-    """Separates a sentence into its requests, in the order written."""
-
-    def split(self, text: str) -> tuple[str, ...]: ...
-
-
 def _deny_split(utterance: str, session: Session, reason: str, trace: list[str]) -> Decision:
     return Decision(
         action=NONE_ACTION,
@@ -245,19 +203,20 @@ def route(
     session: Session,
     ledger: Ledger,
     *,
+    classifier: Classifier | None = None,
+    labeler: Labeler | None = None,
     splitter: Splitter | None = None,
-    **decide_kwargs,
+    explainer: Explainer | None = None,
 ) -> Decision:
-    """One classifier call. Several requests: the splitter separates them, the classifier labels them in one call,
+    """One classifier call. Several requests: the splitter separates them, the labeler labels them in one call,
     the rule orders, policy decides the first, and the rest are listed.
     Never mutates the ledger.
     """
-    classifier = decide_kwargs.get("classifier")
     rank = _classify(utterance, classifier)
     if rank is None:
         return _unavailable(utterance, session)
     if rank.request_count != "several":
-        return decide(utterance, session, ledger, rank=rank, **decide_kwargs)
+        return decide(utterance, session, ledger, explainer=explainer, rank=rank)
 
     try:
         requests = splitter.split(utterance) if splitter is not None else ()
@@ -266,7 +225,10 @@ def route(
     if len(requests) < 2:
         return _deny_split(utterance, session, "several requests could not be separated", [f"split_count={len(requests)}"])
 
-    ranks = classifier.label(requests) if classifier is not None else None
+    try:
+        ranks = labeler.label(requests) if labeler is not None else None
+    except Exception:
+        ranks = None
     if ranks is None or len(ranks) != len(requests):
         return _deny_split(utterance, session, "several requests could not be labeled", [f"split_count={len(requests)}"])
 
@@ -275,7 +237,7 @@ def route(
         labels[i], len(ACTION_PRECEDENCE)))
     head = ordered[0]
     first = decide(requests[head], session, ledger,
-                   rank=ranks[head], **decide_kwargs)
+                   explainer=explainer, rank=ranks[head])
     trace = [
         "request_count=several",
         *(f"split[{i}]={requests[i]!r} label={labels[i]} confidence={ranks[i].confidence:.4f}" for i in range(len(requests))),

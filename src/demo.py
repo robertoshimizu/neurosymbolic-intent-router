@@ -40,7 +40,7 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
         else:
             allowed_str = "YES" if decision.permissions.get(
                 act, False) else "NO"
-        if show_similarity:
+        if decision.description_match is not None:
             explained = decision.description_match.similarities.get(act)
             explained_str = f"{explained:.4f}" if explained is not None else "—"
             print(
@@ -118,8 +118,8 @@ if __name__ == "__main__":
 
     for key in ("guest", "zero", "funded"):
         session = sessions[key]
-        decision = route(utterance, session, ledger,
-                         classifier=classifier, explainer=explainer, splitter=splitter)
+        decision = route(utterance, session, ledger, classifier=classifier,
+                         labeler=classifier, splitter=splitter, explainer=explainer)
         balance = ledger.get_balance(session.account_id)
         print(f"\n--- Session '{key}' (balance=${balance}) ---")
         print_decision(utterance, session, decision)

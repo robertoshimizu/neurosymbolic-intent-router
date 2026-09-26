@@ -3,22 +3,19 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
-from types import SimpleNamespace
+from typing import NoReturn
 
 import numpy as np
 import pytest
 
-from router import (
-    ACTION_CATALOG,
-    Decision,
-    IntentRank,
-    decide,
-    route,
-)
+from contracts import Classifier, DescriptionMatch, Explainer, IntentRank, Labeler, RequestCount, Splitter
 from jev import JevClassifier
-from minilm import MiniLMExplainer
+from minilm import ActionEmbedder, MiniLMExplainer
+from policy import ACTION_CATALOG
+from router import Decision, decide, route
 from policy import Session
 from transfer import Ledger, WireTransfer, confirm_or_refuse
 
@@ -114,8 +111,47 @@ def test_confirm_refused_when_balance_drained() -> None:
     assert ledger.get_balance("acct") == Decimal("0")
 
 
-def _never(*_args) -> None:
+def _never(*_args: object) -> NoReturn:
     raise AssertionError("must not run")
+
+
+class _FakeClassifier(Classifier):
+    def __init__(self, classify: Callable[[str], IntentRank | None]) -> None:
+        self._classify = classify
+
+    def classify(self, text: str) -> IntentRank | None:
+        return self._classify(text)
+
+
+class _FakeLabeler(Labeler):
+    def __init__(self, label: Callable[[tuple[str, ...]], list[IntentRank] | None]) -> None:
+        self._label = label
+
+    def label(self, texts: tuple[str, ...]) -> list[IntentRank] | None:
+        return self._label(texts)
+
+
+class _FakeSplitter(Splitter):
+    def __init__(self, split: Callable[[str], tuple[str, ...]]) -> None:
+        self._split = split
+
+    def split(self, text: str) -> tuple[str, ...]:
+        return self._split(text)
+
+
+class _FixedEmbedder(ActionEmbedder):
+    """Fixed vectors, so the real MiniLMExplainer runs without the model."""
+
+    def __init__(self, query: np.ndarray, actions: dict[str, np.ndarray]) -> None:
+        super().__init__()
+        self._query = query
+        self._actions = actions
+
+    def embed(self, text: str) -> np.ndarray:
+        return self._query
+
+    def action_embeddings(self, catalog: dict[str, str] | None = None) -> dict[str, np.ndarray]:
+        return self._actions
 
 
 def _jev_rank(action: str, confidence: float) -> IntentRank:
@@ -130,8 +166,8 @@ def _jev_rank(action: str, confidence: float) -> IntentRank:
     )
 
 
-def _classifier(rank: IntentRank | None, labels=None) -> SimpleNamespace:
-    return SimpleNamespace(classify=lambda _text: rank, label=labels or _never)
+def _classifier(rank: IntentRank | None) -> _FakeClassifier:
+    return _FakeClassifier(lambda _text: rank)
 
 
 def test_jev_none_stops_before_policy() -> None:
@@ -168,8 +204,7 @@ def test_minilm_disagreement_does_not_override_jev() -> None:
         _session("funded"),
         _ledger(Decimal("10000")),
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
-        explainer=MiniLMExplainer(SimpleNamespace(
-            embed=lambda _text: faq_query, action_embeddings=_orthonormal_catalog)),
+        explainer=MiniLMExplainer(_FixedEmbedder(faq_query, _orthonormal_catalog())),
     )
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "needs_confirmation"
@@ -180,6 +215,24 @@ def test_minilm_disagreement_does_not_override_jev() -> None:
     assert "description_gap=nearest_differs" in decision.rule_trace
 
 
+def test_explainer_failure_keeps_the_decision() -> None:
+    class _BrokenExplainer(Explainer):
+        def explain(self, text: str, action: str) -> DescriptionMatch | None:
+            raise RuntimeError("model failed to load")
+
+    decision = decide(
+        WIRE_UTTERANCE,
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
+        explainer=_BrokenExplainer(),
+    )
+    assert decision.action == "wire_transfer_funds"
+    assert decision.outcome == "needs_confirmation"
+    assert decision.description_match is None
+    assert "explainer=unavailable" in decision.rule_trace
+
+
 def test_classifier_failure_denies_without_guessing() -> None:
     def _boom(_utterance: str) -> IntentRank:
         raise RuntimeError("classifier down")
@@ -188,7 +241,7 @@ def test_classifier_failure_denies_without_guessing() -> None:
         WIRE_UTTERANCE,
         _session("funded"),
         _ledger(Decimal("10000")),
-        classifier=SimpleNamespace(classify=_boom, label=_never),
+        classifier=_FakeClassifier(_boom),
     )
     assert decision.action == "none"
     assert decision.outcome == "deny"
@@ -221,9 +274,18 @@ def _labels(requests: tuple[str, ...]) -> list[IntentRank]:
     return [_jev_rank(LABELS.get(text, "none"), 0.95) for text in requests]
 
 
-def _route(utterance: str, session: Session, ledger: Ledger, *, count: str | None, split, labeler=_labels, action: str = "none") -> Decision:
+def _route(
+    utterance: str, session: Session, ledger: Ledger, *,
+    count: RequestCount | None,
+    split: Callable[[str], tuple[str, ...]],
+    labeler: Callable[[tuple[str, ...]], list[IntentRank] | None] = _labels,
+    action: str = "none",
+) -> Decision:
     rank = replace(_jev_rank(action, 0.9), request_count=count)
-    return route(utterance, session, ledger, splitter=SimpleNamespace(split=split), classifier=_classifier(rank, labeler))
+    return route(
+        utterance, session, ledger,
+        classifier=_classifier(rank), labeler=_FakeLabeler(labeler), splitter=_FakeSplitter(split),
+    )
 
 
 def test_route_orders_money_movement_before_deletion() -> None:

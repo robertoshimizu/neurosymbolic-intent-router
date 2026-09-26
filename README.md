@@ -11,54 +11,69 @@ Two pieces of work sit side by side. They meet in one place: the demo passes Med
 
 ## Architecture
 
-The router never names a model. It defines three roles as small `Protocol`s and depends only on them. Each model is an adapter in its own file that fulfils one role. `src/demo.py` is the composition root: it builds the adapters and hands them to `route()`. Swapping a model means writing a new adapter and changing one line in `demo.py`.
+The router never names a model. `src/contracts.py` defines four roles as `Protocol`s, plus the types they exchange, and imports nothing from the project. Each model is an adapter in its own file that explicitly subclasses the role it fulfils. `src/demo.py` is the composition root: it builds the adapters and hands them to `route()`. Swapping a model means writing a new adapter that subclasses the same roles and changing one line in `demo.py`.
 
 | Role | Contract | Today | File |
 |---|---|---|---|
-| Classifier | `classify(text)`: action (or `none`), confidence, request count. `label(texts)`: one action per text. `None` means unavailable. | Jev | `src/jev.py` |
+| Classifier | `classify(text)`: action (or `none`), confidence, request count. `None` means unavailable. | Jev | `src/jev.py` |
+| Labeler | `label(texts)`: one action per request, in one call. `None` means unavailable. | Jev | `src/jev.py` |
 | Splitter | `split(text)`: the separate requests, in the order written | MedGemma | `src/intent_understanding.py` |
 | Explainer | `explain(text, action)`: a display-only note on the chosen action | MiniLM | `src/minilm.py` |
 
-Arrows mean "imports". The dependency inversion is in the middle band: the arrows run from the adapters (the details) into `router.py` (the high-level rules), because the adapters implement the router's roles and return its types. `router.py` imports only the domain below it, never an adapter. `MedGemmaSplitter` fits `Splitter` by shape alone, so it imports nothing from the router. Two kinds of arrows are left out: the adapters read the action catalog from `policy.py`, and `demo.py` also imports `policy.py` and `transfer.py` to build the sessions and the ledger.
+**How the contract is enforced.** Python checks two different things, at two different times:
+- **A missing method** fails when the adapter is created. Every role method is an `@abstractmethod`, and each adapter subclasses its role explicitly (`class JevClassifier(Classifier, Labeler)`). Leaving out `label` raises `TypeError: Can't instantiate abstract class`.
+- **A wrong signature** fails `uv run pyright`. Python never checks signatures at runtime. Pyright reports "overrides class `Classifier` in an incompatible manner" for any mismatch in parameters or return type.
+
+Both checks were confirmed by planting each violation in `jev.py`.
+
+Arrows mean "imports". Everything points to `contracts.py`, and nothing in it points back. The adapters (the details) and `router.py` (the high-level rules) both depend on the same abstraction, and neither depends on the other. Two kinds of arrows are left out: the adapters read the action catalog from `policy.py`, and `demo.py` also imports `policy.py` and `transfer.py` to build the sessions and the ledger.
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│ demo.py            composition root: builds the adapters and wires   │
-│                    them into route(). The only file naming models.   │
-└─────┬───────────────────┬────────────────────┬─────────────────┬─────┘
-      │ builds            │ builds             │ builds          │ calls route(text,
-      ▼                   ▼                    ▼                 │   classifier=,
-┌───────────────┐  ┌─────────────────┐  ┌──────────────────────┐ │   splitter=,
-│ jev.py        │  │ minilm.py       │  │ intent_understanding │ │   explainer=)
-│ JevClassifier │  │ MiniLMExplainer │  │ MedGemmaSplitter     │ │
-└───────┬───────┘  └────────┬────────┘  └──────────┬───────────┘ │
-        │ implements        │ implements           ┆ implements  │
-        │ Classifier        │ Explainer            ┆ Splitter    │
-        │ (imports router)  │ (imports router)     ┆ (no import: │
-        │                   │                      ┆  structural)│
-        ▼                   ▼                      ▼             ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ router.py          «Protocol» Classifier · Splitter · Explainer      │
-│                    IntentRank · DescriptionMatch · Decision          │
-│                    route() · decide()        imports no adapter      │
-└──────────────────────────────────┬───────────────────────────────────┘
-                                   ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ policy.py          catalog · ACTION_PRECEDENCE · Session             │
-│                    parse_request · policy.decide()    no model code  │
-└──────────────────────────────────┬───────────────────────────────────┘
-                                   ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ transfer.py        Ledger · WireTransfer (python-statemachine)       │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│ demo.py        composition root: builds the adapters and passes them to  │
+│                route(). The only file that names models.                 │
+└────────┬───────────────────┬──────────────────────┬─────────────────┬────┘
+         │ builds            │ builds               │ builds          │
+         ▼                   ▼                      ▼                 │
+┌─────────────────┐ ┌─────────────────┐ ┌──────────────────────┐      │
+│ jev.py          │ │ minilm.py       │ │ intent_understanding │      │
+│ JevClassifier   │ │ MiniLMExplainer │ │ .py                  │      │
+│                 │ │                 │ │ MedGemmaSplitter     │      │
+└────────┬────────┘ └────────┬────────┘ └──────────┬───────────┘      │
+         │ implements        │ implements          │ implements       │
+         │ Classifier,       │ Explainer           │ Splitter         │
+         │ Labeler           │                     │                  │
+         ▼                   ▼                     ▼                  │
+┌──────────────────────────────────────────────────────────────┐      │
+│ contracts.py   «Protocol» Classifier · Labeler · Splitter ·  │      │
+│                           Explainer   (@abstractmethod)      │      │
+│                IntentRank · DescriptionMatch · RequestCount  │      │
+│                imports nothing from the project              │      │
+└──────────────────────────────▲───────────────────────────────┘      │
+                               │ imports the roles                    │ calls
+                               │                                      ▼
+┌──────────────────────────────┴───────────────────────────────────────────┐
+│ router.py      route() · decide() · Decision                             │
+│                imports no adapter                                        │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ policy.py      catalog · ACTION_PRECEDENCE · Session · policy.decide()   │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ transfer.py    Ledger · WireTransfer (python-statemachine)               │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Design decisions
 
-- **Roles, not models.** `route()` and `decide()` take a `classifier`, a `splitter` and an `explainer`. Tests pass simple fakes, so they check the router's rules, not a model's judgment.
+- **Roles, not models.** `route()` takes a `classifier`, a `labeler`, a `splitter` and an `explainer`; `decide()` takes a `classifier` and an `explainer`. Tests pass small fakes that subclass the same roles, so they check the router's rules, not a model's judgment.
+- **Contracts in their own module.** Adapters import `contracts.py`, not the router, so they can be written, tested and replaced without loading the router.
+- **Classifying and labelling are separate roles.** A replacement model may classify one sentence well but not label a batch in one call. Jev happens to provide both, so the demo passes it twice.
 - **Each adapter owns its calibration.** Jev's 0.5 confidence floor lives in `jev.py` and turns an unsure answer into `none`. MiniLM's 0.45 description-gap floor lives in `minilm.py`. The router sees only an action or `none`, so two scales never meet in one rule.
 - **No fallback.** If the classifier is missing or down, the sentence is denied with "classifier unavailable". MiniLM used to rank in Jev's place, and it gave absurd sentences whichever action was least far away.
-- **The explainer never votes.** MiniLM's scores are printed beside the classifier's, and a disagreement is labelled a description gap. It never changes the decision.
+- **The explainer never votes.** MiniLM's scores are printed beside the classifier's, and a disagreement is labelled a description gap. It never changes the decision, and if it fails the decision goes ahead without the note (`explainer=unavailable` in the trace).
 - **The splitter has one narrow job.** MedGemma only rewrites a sentence into separate requests. When it also chose actions, it copied the catalog descriptions and lost "$500", so labelling stays with the classifier.
 - **One classifier call per sentence.** That call returns both the action and the request count. A second call happens only when there are several requests, and it labels all of them at once.
 - **A rule, not a model, orders requests.** `ACTION_PRECEDENCE` in `policy.py` puts reads, then the wire, then deletion, then `none`. Only the first request is decided. The rest are listed as follow-ups and never run on their own.
@@ -67,10 +82,8 @@ Arrows mean "imports". The dependency inversion is in the middle band: the arrow
 
 ### Known limits of this design
 
-- The Protocols and shared types live in `router.py`, so an adapter that imports them loads the router module too. A separate module for the contracts would remove that.
-- `Classifier` bundles `classify` and `label`. A model that can only do one must still provide both.
-- `request_count` is a plain string. A classifier that answers `"two"` instead of `"several"` would silently be treated as one request.
-- A new action means editing `ACTION_CATALOG`, `ACTION_PRECEDENCE` and the `if action == ...` branches in `policy.py`. With four actions this was left as is.
+- A new action means editing `ACTION_CATALOG`, `ACTION_PRECEDENCE` and the `if action == ...` branches in `policy.py`. That is deliberately left for later.
+- Pyright runs in `standard` mode, not `strict`. It checks every signature against the contracts, but it does not require every value to be typed.
 
 ## Run
 
@@ -79,6 +92,7 @@ uv sync
 uv run python src/demo.py
 uv run python src/coffee.py
 uv run pytest -m "not integration"
+uv run pyright
 ```
 
 The demo calls TypeSafe Jev when `TYPESAFE_API_KEY` is set in `.env`. That file is gitignored. MiniLM weights and embedding vectors are cached under `.cache/`, which is also gitignored. Hugging Face downloads use `HF_TOKEN` from the same `.env` file. Neither value is printed.
@@ -95,7 +109,7 @@ uv run pytest tests/test_intent_understanding.py -m integration -s
 
 1. The classifier receives the sentence in one call. Jev answers two closed questions: which action (the four catalog actions plus `none`), and how many requests the sentence makes (`none`, `one`, `several`). Identity, role, and balance are not sent. If the classifier is missing or down, the sentence is denied with "classifier unavailable".
 2. If the count is not `several`, the sentence goes straight to `decide()` with that answer. Most sentences stop here.
-3. If the count is `several`, the splitter (MedGemma) rewrites the sentence as plain requests in the user's own words. It does not choose actions. The classifier then labels every request in one call.
+3. If the count is `several`, the splitter (MedGemma) rewrites the sentence as plain requests in the user's own words. It does not choose actions. The labeler (also Jev) then labels every request in one call.
 4. `ACTION_PRECEDENCE` orders the requests: reads, then the wire, then deletion, then `none`. Only the first goes to `decide()`. The others are listed as follow-ups and are not evaluated. If the first is denied, nothing is listed. If the split or the labelling fails, the sentence is denied.
 
 `decide()` then applies the rules.
@@ -130,7 +144,7 @@ The chart shows calls at runtime. The Architecture section shows which module im
                │           fails or < 2 ──► DENY
                │                        ▼
                │       ┌──────────────────────────────────┐
-               │       │ Classifier.label                 │
+               │       │ Labeler.label                    │
                │       │ 1 call, 1 question per request   │
                │       └────────────────┬─────────────────┘
                │           fails ──────────► DENY
@@ -239,7 +253,7 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 
 ## Tests
 
-`uv run pytest -m "not integration"` runs the unit tests. Integration tests call MiniLM, Jev, or MedGemma. Router tests use a fake classifier, splitter and explainer, so they check the router's rules, not the models' judgment.
+`uv run pytest -m "not integration"` runs the unit tests, including pyright, so one command checks both the contracts' signatures and their meaning. Integration tests call MiniLM, Jev, or MedGemma. To check a new adapter, add it to the role's fixture in `test_contracts.py`. Router tests use a fake classifier, splitter and explainer, so they check the router's rules, not the models' judgment.
 
 | Test | Goal | Type |
 |---|---|---|
@@ -255,6 +269,7 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 | jev_none_stops_before_policy | A `none` action is denied before policy | unit |
 | jev_wire_still_needs_confirmation | A wire chosen by the classifier still needs confirmation | unit |
 | minilm_disagreement_does_not_override_jev | The explainer never replaces the classifier's choice | unit |
+| explainer_failure_keeps_the_decision | A broken explainer loses its note, never the decision | unit |
 | classifier_failure_denies_without_guessing | A classifier that is down means deny, not a guess | unit |
 | route_orders_money_movement_before_deletion | Close + wire: the wire goes first, close is listed | unit |
 | route_denied_first_request_offers_no_follow_ups | A denied first request lists nothing | unit |
@@ -270,6 +285,15 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 | disk_cached_embed_does_not_load_model | A cached query vector skips the model | unit |
 | disk_cached_actions_do_not_load_model | Cached action vectors skip the model | unit |
 | minilm_agrees_with_wire_for_canonical_sentence | Real MiniLM agrees with the wire and shows no gap | integration |
+| `test_contracts.py` | | |
+| pyright_reports_no_errors | Every adapter and fake matches its role's signatures; runs pyright | unit |
+| unavailable_classifier_returns_none (no key, call fails) | An unavailable classifier returns `None`, never raises or guesses | unit |
+| unavailable_labeler_returns_none (no key, call fails) | The same for the labeler | unit |
+| classifier_answers_within_the_catalog | Actions stay in the catalog plus `none`; the count is a valid `RequestCount` | unit |
+| labeler_answers_once_per_request_in_order | One label per request, in the order given | unit |
+| unreachable_splitter_raises_instead_of_inventing_requests | A splitter that cannot reach its model raises, so the router denies | unit |
+| splitter_keeps_written_order_and_uses_its_settings | Requests come back in written order, from the configured model | unit |
+| explainer_flags_a_gap_below_its_floor (0.46, 0.44) | MiniLM flags a gap just below 0.45 and not just above | unit |
 | `test_intent_understanding.py` | | |
 | prompt_appends_only_the_text | The prompt only appends the sentence | unit |
 | parser_keeps_items_without_a_statement_field | The JSON parser keeps MedGemma's own fields | unit |
@@ -277,7 +301,7 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 | medgemma_reads_sentence (6 sentences) | Full reading, with loose keyword checks | integration |
 | medgemma_splits_requests (4 sentences) | MedGemma splits in the user's words | integration |
 
-Every unit test except `parser_keeps_items_without_a_statement_field` was checked by planting the bug it guards against and confirming that the test fails. `medgemma_reads_sentence` is weaker than it looks. Its keyword checks passed on a supplier reading that asserted a causal link the rules forbid.
+Every unit test except `parser_keeps_items_without_a_statement_field` was checked by planting the bug it guards against and confirming that the test fails. For the contract tests, each of eight planted adapter bugs failed only the tests meant to catch it. `medgemma_reads_sentence` is weaker than it looks. Its keyword checks passed on a supplier reading that asserted a causal link the rules forbid.
 
 ## What is not solved
 

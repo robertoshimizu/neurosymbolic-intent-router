@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from dotenv import load_dotenv
 
+from contracts import DescriptionMatch, Explainer
 from policy import ACTION_CATALOG
-from router import DescriptionMatch
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 # HF_TOKEN for Hub downloads comes from the project .env, never from code.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
@@ -20,7 +24,7 @@ MODEL_CACHE_DIR = Path(__file__).resolve(
 # Persistent embedding vectors so CLI runs can skip loading weights into RAM.
 EMBEDDING_CACHE_DIR = Path(__file__).resolve(
 ).parents[1] / ".cache" / "embeddings"
-_MODEL_CACHE: dict[str, object] = {}
+_MODEL_CACHE: dict[str, SentenceTransformer] = {}
 # A chosen action below this cosine is shown as a description gap.
 MIN_SCORE = 0.45
 
@@ -77,10 +81,10 @@ class ActionEmbedder:
             Path(embedding_cache_dir) if embedding_cache_dir else EMBEDDING_CACHE_DIR
         )
         self.use_embedding_cache = use_embedding_cache
-        self._model = None
+        self._model: SentenceTransformer | None = None
         self._action_embeddings: dict[str, np.ndarray] | None = None
 
-    def _load_model(self):
+    def _load_model(self) -> SentenceTransformer:
         if self._model is not None:
             return self._model
 
@@ -174,7 +178,7 @@ class ActionEmbedder:
 
             npz_path, meta_path = self._action_cache_paths(catalog)
             npz_path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(npz_path, **self._action_embeddings)
+            np.savez(npz_path, allow_pickle=False, **self._action_embeddings)
             meta_path.write_text(
                 json.dumps(
                     {
@@ -187,7 +191,7 @@ class ActionEmbedder:
         return self._action_embeddings
 
 
-class MiniLMExplainer:
+class MiniLMExplainer(Explainer):
     """Never picks or blocks an action. A chosen action far from its description is a gap."""
 
     def __init__(self, embedder: ActionEmbedder | None = None) -> None:
@@ -196,7 +200,7 @@ class MiniLMExplainer:
     def explain(self, text: str, action: str) -> DescriptionMatch:
         similarities = cosine_scores(
             self.embedder.embed(text), self.embedder.action_embeddings())
-        nearest = max(similarities, key=similarities.get)
+        nearest = max(similarities, key=lambda name: similarities[name])
         chosen_score = float(similarities.get(action, 0.0))
         return DescriptionMatch(
             chosen=action,
