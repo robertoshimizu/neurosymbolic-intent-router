@@ -14,12 +14,10 @@ from hybrid import (
     ActionEmbedder,
     Decision,
     IntentRank,
-    Session,
     decide,
-    evaluate_action,
-    parse_request,
     route,
 )
+from policy import Session
 from transfer import Ledger, WireTransfer, confirm_or_refuse
 
 
@@ -78,55 +76,6 @@ def _decide_wire(
         action_embeddings=_orthonormal_catalog(),
         **kwargs,
     )
-
-
-def test_parse_amount_with_comma_and_dollar() -> None:
-    parsed = parse_request(
-        WIRE_UTTERANCE,
-        ("external bank account",),
-    )
-    assert parsed.amount == Decimal("5000")
-    assert parsed.payee == "external bank account"
-
-
-def test_unknown_payee_does_not_bind() -> None:
-    parsed = parse_request(
-        WIRE_UTTERANCE,
-        ("savings vault",),
-    )
-    assert parsed.amount == Decimal("5000")
-    assert parsed.payee is None
-
-
-def test_guest_wire_denied() -> None:
-    session = _session(
-        "guest",
-        is_authenticated=False,
-        role="guest",
-        status="inactive",
-        account_id="a",
-        payee_allowlist=(),
-    )
-    allowed, reason = evaluate_action(
-        "wire_transfer_funds",
-        session,
-        Decimal("0"),
-        parse_request("send $5,000", ()),
-    )
-    assert allowed is False
-    assert "not signed in" in reason
-
-
-def test_delete_denied_for_customer() -> None:
-    session = _session("cust", account_id="a", payee_allowlist=())
-    allowed, reason = evaluate_action(
-        "delete_account",
-        session,
-        Decimal("100"),
-        parse_request("delete my account", ()),
-    )
-    assert allowed is False
-    assert "admin" in reason
 
 
 def test_insufficient_funds_suggests_balance_view() -> None:

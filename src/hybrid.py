@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -14,6 +13,17 @@ import numpy as np
 from dotenv import load_dotenv
 
 from intent_understanding import split_requests
+import policy
+from policy import (
+    ACTION_CATALOG,
+    ACTION_PRECEDENCE,
+    NONE_ACTION,
+    Outcome,
+    ParsedRequest,
+    Session,
+    evaluate_action,
+    parse_request,
+)
 from transfer import Ledger, WireTransfer, confirm_or_refuse
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -42,46 +52,7 @@ MIN_SCORE = 0.45
 MIN_MARGIN = 0.08
 # Jev confidence is a probability, not a cosine. Docs treat values under 0.5 as unsure.
 JEV_MIN_CONFIDENCE = 0.5
-NONE_ACTION = "none"
-
-HIGH_STAKES_ACTIONS = frozenset({"wire_transfer_funds", "delete_account"})
-
-# Logical order for several requests: reads, then money movement, then deletion.
-# Ties keep the written order. `none` goes last so a real action runs first.
-ACTION_PRECEDENCE: dict[str, int] = {
-    "view_public_faq": 0,
-    "view_account_balance": 0,
-    "wire_transfer_funds": 1,
-    "delete_account": 2,
-}
-
-ACTION_CATALOG: dict[str, str] = {
-    "wire_transfer_funds": (
-        "Send money by wire transfer to an external bank account"
-    ),
-    "view_account_balance": "Show the current account balance",
-    "delete_account": "Permanently delete the user account",
-    "view_public_faq": "Open the public frequently asked questions page",
-}
-
 NONE_CRITERION = "The utterance is not a request for any of these banking actions"
-
-AMOUNT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
-
-Outcome = Literal["deny", "execute", "needs_confirmation"]
-
-
-@dataclass(frozen=True)
-class Session:
-    """Identity and policy facts loaded by session id. Not taken from the utterance."""
-
-    session_id: str
-    is_authenticated: bool
-    role: str
-    status: str
-    account_id: str
-    payee_allowlist: tuple[str, ...] = ()
-
 
 @dataclass(frozen=True)
 class DescriptionMatch:
@@ -106,12 +77,6 @@ class DescriptionMatch:
 
 
 @dataclass(frozen=True)
-class ParsedRequest:
-    amount: Decimal | None
-    payee: str | None
-
-
-@dataclass(frozen=True)
 class Decision:
     action: str | None
     outcome: Outcome
@@ -124,61 +89,6 @@ class Decision:
     source: Literal["jev", "minilm"] = "minilm"
     description_match: DescriptionMatch | None = None
     follow_ups: tuple[str, ...] = ()
-
-
-def parse_request(
-    utterance: str, payee_allowlist: tuple[str, ...]
-) -> ParsedRequest:
-    """Extract a dollar amount and a registered payee label from the sentence."""
-    amount: Decimal | None = None
-    match = AMOUNT_RE.search(utterance)
-    if match:
-        amount = Decimal(match.group(1).replace(",", ""))
-
-    payee: str | None = None
-    lower = utterance.lower()
-    for label in payee_allowlist:
-        if label.lower() in lower:
-            payee = label
-            break
-
-    return ParsedRequest(amount=amount, payee=payee)
-
-
-def evaluate_action(
-    action: str,
-    session: Session,
-    balance: Decimal,
-    parsed: ParsedRequest,
-) -> tuple[bool, str]:
-    """Return (allowed, reason) for one catalog action against session facts."""
-    if action == "wire_transfer_funds":
-        if not session.is_authenticated:
-            return False, "caller is not signed in"
-        if session.status != "active":
-            return False, "account is not active"
-        if parsed.amount is None or parsed.amount <= 0:
-            return False, "transfer amount is missing or invalid"
-        if parsed.payee is None:
-            return False, "payee is not on the allowlist"
-        if parsed.amount > balance:
-            return False, "insufficient funds for the requested amount"
-        return True, "wire transfer permitted"
-
-    if action == "delete_account":
-        if not (session.is_authenticated and session.role == "admin"):
-            return False, "delete requires an authenticated admin"
-        return True, "account deletion permitted"
-
-    if action == "view_account_balance":
-        if not session.is_authenticated:
-            return False, "caller is not signed in"
-        return True, "balance view permitted"
-
-    if action == "view_public_faq":
-        return True, "public faq always allowed"
-
-    return False, "unknown action denied"
 
 
 def evaluate_permissions(
@@ -530,7 +440,6 @@ def decide(
         embedder=embedder,
     )
     balance = ledger.get_balance(session.account_id)
-    parsed = parse_request(utterance, session.payee_allowlist)
     scores = rank.scores
 
     if rank.source == "jev" and (
@@ -540,7 +449,7 @@ def decide(
             action=NONE_ACTION,
             outcome="deny",
             reason="no matching action",
-            parsed=parsed,
+            parsed=parse_request(utterance, session.payee_allowlist),
             scores=scores,
             permissions={},
             rule_trace=[
@@ -569,10 +478,12 @@ def decide(
     catalog_actions = [action for action in scores if action in ACTION_CATALOG]
     if top_action not in ACTION_CATALOG:
         catalog_actions = list(ACTION_CATALOG)
-    permissions, reasons = evaluate_permissions(
+    verdict = policy.decide(utterance, top_action, session, ledger)
+    parsed = verdict.parsed
+    policy_reason = verdict.reason
+    permissions, _reasons = evaluate_permissions(
         session, balance, parsed, catalog_actions or [top_action]
     )
-    policy_reason = reasons.get(top_action, "unknown action denied")
 
     rule_trace = [
         f"source={rank.source}",
@@ -618,14 +529,8 @@ def decide(
             description_match=description_match,
         )
 
-    if not permissions.get(top_action, False):
-        suggestion = None
-        if (
-            top_action == "wire_transfer_funds"
-            and "insufficient funds" in policy_reason
-        ):
-            suggestion = "view_account_balance"
-        return _decision("deny", policy_reason, suggestion=suggestion)
+    if verdict.outcome == "deny":
+        return _decision("deny", policy_reason, suggestion=verdict.suggestion)
 
     if rank.source == "minilm" and rank.confidence < min_score:
         return _decision(
@@ -645,7 +550,7 @@ def decide(
             trace_extra=["confidence=below_min_margin"],
         )
 
-    if top_action in HIGH_STAKES_ACTIONS:
+    if verdict.outcome == "needs_confirmation":
         return _decision(
             "needs_confirmation",
             policy_reason,
