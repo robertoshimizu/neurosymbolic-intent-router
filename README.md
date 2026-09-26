@@ -2,7 +2,7 @@
 
 **Models interpret, rules decide.** Language models only read the text; symbolic rules choose and authorize every action.
 
-`#MedGemma` `#Qwen3.8` `#MiniLM` `#SentenceTransformers` `#Jev` `#python-statemachine` `#StateMachine` `#FiniteStateMachine` `#NeuroSymbolic` `#NeuroSymbolicAI` `#IntentClassification` `#LLM` `#NLP` `#Ollama` `#Instructor` `#Pydantic` `#Pyright` `#Python` `#Prolog` `#SWIProlog` `#FailClosed` `#StructuredOutput`
+`#MedGemma` `#Qwen3.8` `#GLiNER` `#MiniLM` `#SentenceTransformers` `#Jev` `#python-statemachine` `#StateMachine` `#FiniteStateMachine` `#NeuroSymbolic` `#NeuroSymbolicAI` `#IntentClassification` `#LLM` `#NLP` `#Ollama` `#Instructor` `#Pydantic` `#Pyright` `#Python` `#Prolog` `#SWIProlog` `#FailClosed` `#StructuredOutput`
 
 ## Why
 
@@ -25,6 +25,7 @@ A bank assistant must not act on a misread request. This project tests two hypot
 │ ┌──────────────────── routing ────────────────────┐        │
 │ │  NEURAL · interpret                             │        │
 │ │    What is being asked? How many requests?      │        │
+│ │    Which amount? Which payee?                   │        │
 │ │  SYMBOLIC · decide                              │        │
 │ │    Inside the contract? Which request first?    │        │
 │ │    Allowed for this session and balance?        │        │
@@ -41,17 +42,17 @@ A bank assistant must not act on a misread request. This project tests two hypot
 └────────────────────────────────────────────────────────────┘
 ```
 
-- **Neural, interpret.** Jev reads the intent and counts the requests. MedGemma splits a sentence with several requests. MiniLM shows how close the sentence is to each action's description, for display only.
-- **Symbolic, decide.** A swappable reasoner, SWI-Prolog (`policy.pl`) by default or the same rules in Python, orders the requests, allows or denies the first, lists every reason for a denial, and may suggest a permitted alternative.
+- **Neural, interpret.** Jev reads the intent and counts the requests. MedGemma splits a sentence with several requests. GLiNER reads each request's amount and payee as spans of its text. MiniLM shows how close the sentence is to each action's description, for display only.
+- **Symbolic, decide.** A swappable reasoner, SWI-Prolog (`policy.pl`) by default or the same rules in Python, turns the spans into facts (exactly one amount in dollars and one allowlisted payee), orders the requests, allows or denies the first, lists every reason for a denial, and may suggest a permitted alternative.
 - **State machine, execute.** `RequestWorkflow` runs `received → routing → refused | executing → completed | failed`. A wire runs its own `WireTransfer`, which re-checks the balance and debits once.
 
 Any doubt means deny: a model that is unsure, down or off-contract, an amount that cannot be parsed, or a reasoner that fails.
 
 ## Demo
 
-One sentence, three bank customers. Output of `uv run --env-file .env python src/demo.py` on 2026-09-26, with the Prolog reasoner: one run, trimmed, not edited. It needs Jev (`TYPESAFE_API_KEY`), a local Ollama with `medgemma:27b`, and SWI-Prolog; see Run.
+One sentence, three bank customers. Output of `uv run --env-file .env python src/demo.py` on 2026-09-26, with the Prolog reasoner: one run, trimmed, not edited. It needs Jev (`TYPESAFE_API_KEY`), a local Ollama with `medgemma:27b`, SWI-Prolog, and the GLiNER model (downloaded on first run); see Run.
 
-The sentence makes two requests. Jev reads it as `several`, MedGemma splits it into "Close this account." and "Send $500 to my external bank account.", Jev labels each one, and the precedence rule puts the wire first. The split itself is not printed; the follow-up line comes from it. A denial lists every reason the rules found, not only the first.
+The sentence makes two requests. Jev reads it as `several`, MedGemma splits it into "Close this account." and "Send $500 to my external bank account.", Jev labels each one, the precedence rule puts the wire first, and GLiNER reads "$500" and "external bank account" from it. The split itself is not printed; the follow-up line comes from it. A denial lists every reason the rules found, not only the first.
 
 **User not authenticated ($0): refused for four reasons; no suggestion, because the rules would deny the balance view too.**
 
@@ -72,10 +73,10 @@ delete_account           | 0.0000           | 0.1422          | NO
 view_public_faq          | 0.0000           | 0.0869          | YES
 view_account_balance     | 0.0000           | 0.2191          | NO
 
-Decision: action=wire_transfer_funds outcome=deny reason=caller is not authenticated; account is not active; payee is not on the allowlist; insufficient funds for the requested amount
+Decision: action=wire_transfer_funds outcome=deny reason=caller is not authenticated; account is not active; payee is missing, ambiguous or not on the allowlist; insufficient funds for the requested amount
 Explainer agrees: wire_transfer_funds score=0.5360
 
-Workflow: received -> routing -> refused (caller is not authenticated; account is not active; payee is not on the allowlist; insufficient funds for the requested amount). Balance now $0
+Workflow: received -> routing -> refused (caller is not authenticated; account is not active; payee is missing, ambiguous or not on the allowlist; insufficient funds for the requested amount). Balance now $0
 ```
 
 **Customer with no money ($0): refused, insufficient funds; the rules suggest the balance view.**
@@ -197,6 +198,7 @@ The router depends only on roles defined in `src/contracts.py`. `src/demo.py` ch
 |---|---|---|
 | Classifier, Labeler | Intent and request count; a label for each split request | Jev (`adapters/jev.py`) |
 | Splitter | The separate requests, as written | MedGemma on Ollama (`adapters/medgemma.py`) |
+| Extractor | Amount and payee spans of one request, copied from its text | GLiNER2.5 (`adapters/gliner.py`) |
 | Explainer | Closeness to each action description, display only | MiniLM (`adapters/minilm.py`) |
 | Policy | Order of requests; allow or deny with every reason; suggestion | Prolog (`adapters/prolog_policy.py`, `adapters/policy.pl`) or Python (`adapters/python_policy.py`) |
 
@@ -213,16 +215,19 @@ The router depends only on roles defined in `src/contracts.py`. `src/demo.py` ch
 │ jev.py       │ │ minilm.py    │ │ medgemma.py  │ │ prolog_policy │     │
 │ JevClassifier│ │ MiniLM-      │ │ MedGemma-    │ │ .py + .pl     │     │
 │              │ │ Explainer    │ │ Splitter     │ │ python_policy │     │
-│              │ │              │ │              │ │ .py           │     │
+│              │ │              │ │ gliner.py    │ │ .py           │     │
+│              │ │              │ │ GLiNER-      │ │               │     │
+│              │ │              │ │ Extractor    │ │               │     │
 └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └───────┬───────┘     │
        │ implements     │ implements     │ implements      │ implements  │
-       │ Classifier,    │ Explainer      │ Splitter        │ Policy      │
-       │ Labeler        │                │                 │             │
+       │ Classifier,    │ Explainer      │ Splitter,       │ Policy      │
+       │ Labeler        │                │ Extractor       │             │
        ▼                ▼                ▼                 ▼             │
 ┌──────────────────────────────────────────────────────────────────┐     │
 │ contracts.py   «Protocol» Classifier · Labeler · Splitter ·      │     │
-│                Explainer · Policy   (@abstractmethod)            │     │
-│                IntentRank · PolicyResult · DescriptionMatch      │     │
+│                Extractor · Explainer · Policy (@abstractmethod)  │     │
+│                IntentRank · Extraction · PolicyResult ·          │     │
+│                DescriptionMatch                                  │     │
 │                imports only domain types from policy.py          │     │
 └──────────────────────────────▲───────────────────────────────────┘     │
                                │ imports the roles                       │ calls, via workflow.py
@@ -233,7 +238,8 @@ The router depends only on roles defined in `src/contracts.py`. `src/demo.py` ch
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ policy.py      catalog · Session · ParsedRequest · parse_request         │
+│ policy.py      catalog · Session · ParsedRequest                         │
+│                to_request · to_dollars (text2num)                        │
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -269,5 +275,5 @@ Not measured yet: everything above comes from single runs on hand-picked sentenc
 
 Next:
 - a labelled evaluation set with a model-only baseline: precision, recall, and wrong actions executed;
-- amounts in words and "the remaining cash" (amount parsing is still Python only, outside the reasoner);
+- "the remaining cash" and relative amounts, which are refused today;
 - how stable Jev's count and MedGemma's split are across runs.
