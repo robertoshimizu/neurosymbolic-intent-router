@@ -77,17 +77,17 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
 
 def build_demo_world() -> tuple[dict[str, Session], Ledger]:
     ledger = Ledger()
-    ledger.set_balance("acct-guest", Decimal("0"))
+    ledger.set_balance("acct-unauthenticated", Decimal("0"))
     ledger.set_balance("acct-zero", Decimal("0"))
     ledger.set_balance("acct-funded", Decimal("10000"))
 
     sessions = {
-        "guest": Session(
-            session_id="guest",
+        "unauthenticated": Session(
+            session_id="unauthenticated",
             is_authenticated=False,
-            role="guest",
+            role="unauthenticated",
             status="inactive",
-            account_id="acct-guest",
+            account_id="acct-unauthenticated",
             payee_allowlist=(),
         ),
         "zero": Session(
@@ -117,7 +117,7 @@ if __name__ == "__main__":
     explainer = MiniLMExplainer()
     splitter = MedGemmaSplitter()
 
-    for key in ("guest", "zero", "funded"):
+    for key in ("unauthenticated", "zero", "funded"):
         session = sessions[key]
         balance = ledger.get_balance(session.account_id)
         workflow = RequestWorkflow(

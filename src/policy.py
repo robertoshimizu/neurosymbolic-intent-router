@@ -85,7 +85,7 @@ def evaluate_action(
     """Return (allowed, reason) for one catalog action against session facts."""
     if action == "wire_transfer_funds":
         if not session.is_authenticated:
-            return False, "caller is not signed in"
+            return False, "caller is not authenticated"
         if session.status != "active":
             return False, "account is not active"
         if parsed.amount is None or parsed.amount <= 0:
@@ -103,7 +103,7 @@ def evaluate_action(
 
     if action == "view_account_balance":
         if not session.is_authenticated:
-            return False, "caller is not signed in"
+            return False, "caller is not authenticated"
         return True, "balance view permitted"
 
     if action == "view_public_faq":

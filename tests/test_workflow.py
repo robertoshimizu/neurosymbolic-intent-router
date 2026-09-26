@@ -33,10 +33,10 @@ class _DrainAfterRouting:
         self._ledger.set_balance("acct", Decimal("100"))
 
 
-def _session(role: str = "customer", *, signed_in: bool = True) -> Session:
+def _session(role: str = "customer", *, authenticated: bool = True) -> Session:
     return Session(
         session_id="s",
-        is_authenticated=signed_in,
+        is_authenticated=authenticated,
         role=role,
         status="active",
         account_id="acct",
@@ -63,7 +63,7 @@ def _run(
 
 def test_denied_request_is_refused_and_never_executes() -> None:
     ledger = _ledger("10000")
-    workflow = _run(WIRE_500, "wire_transfer_funds", _session(signed_in=False), ledger)
+    workflow = _run(WIRE_500, "wire_transfer_funds", _session(authenticated=False), ledger)
     assert workflow.path == ["received", "routing", "refused"]
     assert ledger.get_balance("acct") == Decimal("10000")
 

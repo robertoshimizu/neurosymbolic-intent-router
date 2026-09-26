@@ -69,6 +69,95 @@ In many agent designs the model chooses the next step. Here the model's output i
 
 The design fails closed. A sentence is denied when a model is unsure, unavailable, or answers outside its contract, and when an amount cannot be parsed. That is a deliberate cost to recall: for a bank, refusing and asking again costs less than acting wrongly.
 
+## Demo
+
+One sentence, three bank customers. Output of `uv run python src/demo.py` on 2026-09-26: one run, trimmed, not edited. It needs Jev (`TYPESAFE_API_KEY`) and a local Ollama with `medgemma:27b`; see Run.
+
+The sentence makes two requests. Jev reads it as `several`, MedGemma splits it into "Close this account." and "Send $500 to my external bank account.", Jev labels each one, and the precedence rule puts the wire first. The split itself is not printed; the follow-up line comes from it.
+
+**User not authenticated ($0): refused.**
+
+```
+User Query: 'Close this account and send $500 to my external bank account.'
+Context: Auth=False, Role='unauthenticated', Status='inactive', Account='acct-unauthenticated'
+
+Classifier: jev
+
+Action Decision Matrix:
+Candidate Action         | Classifier Score | Explainer Score | Allowed?
+--------------------------------------------------------------------------
+wire_transfer_funds      | 0.9900           | 0.5360          | NO
+none                     | 0.0100           | —               | NO
+view_public_faq          | 0.0000           | 0.0869          | YES
+view_account_balance     | 0.0000           | 0.2191          | NO
+delete_account           | 0.0000           | 0.1422          | NO
+
+Decision: action=wire_transfer_funds outcome=deny reason=caller is not authenticated
+Explainer agrees: wire_transfer_funds score=0.5360
+
+Workflow: received -> routing -> refused (caller is not authenticated). Balance now $0
+```
+
+**Customer with no money ($0): refused, insufficient funds; the rules suggest the balance view.**
+
+```
+User Query: 'Close this account and send $500 to my external bank account.'
+Context: Auth=True, Role='customer', Status='active', Account='acct-zero'
+
+Classifier: jev
+
+Action Decision Matrix:
+Candidate Action         | Classifier Score | Explainer Score | Allowed?
+--------------------------------------------------------------------------
+wire_transfer_funds      | 0.9900           | 0.5360          | NO
+none                     | 0.0100           | —               | NO
+view_account_balance     | 0.0000           | 0.2191          | YES
+view_public_faq          | 0.0000           | 0.0869          | YES
+delete_account           | 0.0000           | 0.1422          | NO
+
+Decision: action=wire_transfer_funds outcome=deny reason=insufficient funds for the requested amount
+Explainer agrees: wire_transfer_funds score=0.5360
+Suggestion: view_account_balance
+
+Workflow: received -> routing -> refused (insufficient funds for the requested amount). Balance now $0
+```
+
+**Funded customer ($10,000): the wire is allowed and settled; closing the account is listed, not run.**
+
+```
+User Query: 'Close this account and send $500 to my external bank account.'
+Context: Auth=True, Role='customer', Status='active', Account='acct-funded'
+
+Classifier: jev
+
+Action Decision Matrix:
+Candidate Action         | Classifier Score | Explainer Score | Allowed?
+--------------------------------------------------------------------------
+wire_transfer_funds      | 0.9900           | 0.5360          | YES
+none                     | 0.0100           | —               | NO
+view_public_faq          | 0.0000           | 0.0869          | YES
+view_account_balance     | 0.0000           | 0.2191          | YES
+delete_account           | 0.0000           | 0.1422          | NO
+
+Decision: action=wire_transfer_funds outcome=execute reason=wire transfer permitted
+Explainer agrees: wire_transfer_funds score=0.5360
+You also asked (ask again to proceed):
+  - Close this account.
+
+Workflow: received -> routing -> executing -> completed (wire of $500 settled). Balance now $9500
+```
+
+The **Allowed?** column is the symbolic side at work. The model scores are identical in all three runs; the permissions are not:
+
+| Action | Not authenticated | No money | Funded |
+|---|---|---|---|
+| wire_transfer_funds | NO | NO | YES |
+| view_account_balance | NO | YES | YES |
+| view_public_faq | YES | YES | YES |
+| delete_account | NO | NO | NO |
+
+What it shows: the models read the same sentence the same way for all three customers; only the rules and the ledger make the outcomes differ. The model's 0.99 confidence does not move money for the user who is not authenticated.
+
 ## Status
 
 > **Not yet measured.** Precision and recall have not been computed. The results below are single runs on a handful of hand-picked sentences; they show how the design behaves, not how well it performs.
@@ -271,7 +360,7 @@ The chart shows calls at runtime. The Architecture section shows which module im
           └──────────────────────────────────┘
 ```
 
-On a clear sentence, "I want to send $5,000 to my external bank account.", the three sessions behave as follows. A guest is denied because they are not signed in. A customer with no balance is denied for insufficient funds. A customer with $10,000 is allowed; the workflow settles the wire, leaving $5,000.
+On a clear sentence, "I want to send $5,000 to my external bank account.", the three sessions behave as follows. A user who is not authenticated is denied. A customer with no balance is denied for insufficient funds. A customer with $10,000 is allowed; the workflow settles the wire, leaving $5,000.
 
 ## What the router does not understand
 
@@ -388,7 +477,7 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 | `test_policy.py` | | |
 | parse_amount_with_comma_and_dollar | "$5,000" parses to 5000 and the payee binds | unit |
 | unknown_payee_does_not_bind | A payee outside the allowlist does not bind | unit |
-| guest_wire_denied | A signed-out guest cannot wire | unit |
+| unauthenticated_wire_denied | An unauthenticated user cannot wire | unit |
 | delete_denied_for_customer | Only an admin may delete | unit |
 | `test_router.py` | | |
 | insufficient_funds_suggests_balance_view | A wire above the balance is denied and suggests the balance view | unit |

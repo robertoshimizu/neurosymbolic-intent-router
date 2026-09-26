@@ -32,13 +32,13 @@ def test_unknown_payee_does_not_bind() -> None:
     assert parsed.payee is None
 
 
-def test_guest_wire_denied() -> None:
-    session = _session(is_authenticated=False, role="guest", status="inactive")
+def test_unauthenticated_wire_denied() -> None:
+    session = _session(is_authenticated=False, role="unauthenticated", status="inactive")
     allowed, reason = evaluate_action(
         "wire_transfer_funds", session, Decimal("0"), parse_request("send $5,000", ())
     )
     assert allowed is False
-    assert "not signed in" in reason
+    assert "not authenticated" in reason
 
 
 def test_delete_denied_for_customer() -> None:
