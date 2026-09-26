@@ -1,51 +1,81 @@
-"""One user request, from the router's decision to its effect on the ledger.
+"""One user request, from its text to its effect on the ledger.
 
-The router decides; this state machine executes. No model moves it: only the
-router's Decision (the `decided` event) and the ledger's facts at execution time.
+`routing` is one state that holds the neuro-symbolic step: the models propose,
+the rules decide. Its only exit is the rules' decision (deny or execute).
+`executing` then re-checks the ledger's facts before anything moves.
 """
 
 from __future__ import annotations
 
 from statemachine import State, StateChart
 
+from contracts import Classifier, Explainer, Labeler, Splitter
 from policy import Session
-from router import Decision
+from router import Decision, route
 from transfer import Ledger, WireTransfer, authorize_or_refuse
 
 READ_ONLY_ACTIONS = frozenset({"view_account_balance", "view_public_faq"})
 
 
 class RequestWorkflow(StateChart):
-    """received → refused | executing → completed | failed."""
+    """received → routing → refused | executing → completed | failed."""
 
     allow_event_without_transition = False
 
     received = State(initial=True)
+    routing = State()
     refused = State(final=True)
     executing = State()
     completed = State(final=True)
     failed = State(final=True)
 
-    decided = received.to(refused, cond="is_denied") | received.to(executing, cond="is_approved")
+    start = received.to(routing)
+    routed = routing.to(refused, cond="is_denied") | routing.to(executing, cond="is_approved")
     finish = executing.to(completed)
     fail = executing.to(failed)
 
-    def __init__(self, decision: Decision, session: Session, ledger: Ledger, request_id: str) -> None:
-        self.decision = decision
+    def __init__(
+        self,
+        utterance: str,
+        session: Session,
+        ledger: Ledger,
+        request_id: str,
+        *,
+        classifier: Classifier | None = None,
+        labeler: Labeler | None = None,
+        splitter: Splitter | None = None,
+        explainer: Explainer | None = None,
+    ) -> None:
+        self.utterance = utterance
         self.session = session
         self.ledger = ledger
         self.request_id = request_id
+        self.roles = {"classifier": classifier, "labeler": labeler, "splitter": splitter, "explainer": explainer}
+        self.decision: Decision | None = None
         self.note = ""
+        self.path: list[str] = []
         super().__init__()
 
+    def on_enter_state(self, target: State) -> None:
+        self.path.append(target.id)
+
+    def on_enter_routing(self) -> None:
+        """Neural propose + symbolic decide, as one step. The decision is the only way out."""
+        self.decision = route(
+            self.utterance, self.session, self.ledger,
+            classifier=self.roles["classifier"], labeler=self.roles["labeler"],
+            splitter=self.roles["splitter"], explainer=self.roles["explainer"],
+        )
+        self.send("routed")
+
     def is_denied(self) -> bool:
-        return self.decision.outcome == "deny"
+        return self.decision is not None and self.decision.outcome == "deny"
 
     def is_approved(self) -> bool:
-        return self.decision.outcome == "execute"
+        return self.decision is not None and self.decision.outcome == "execute"
 
     def on_enter_refused(self) -> None:
-        self.note = self.decision.reason
+        self.note = self.decision.reason if self.decision is not None else "no decision"
 
     def on_enter_executing(self) -> None:
         try:
@@ -56,6 +86,7 @@ class RequestWorkflow(StateChart):
 
     def _run(self) -> tuple[bool, str]:
         """Carry out the approved action. Facts are re-checked here, not trusted from the decision."""
+        assert self.decision is not None
         action = self.decision.action
         account = self.session.account_id
         if action in READ_ONLY_ACTIONS:

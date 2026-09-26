@@ -14,12 +14,12 @@ Banking is the test domain, because the cost of a wrong action is obvious there.
 
 *Why we expect this:* language models are good at reading language, but their answers are not calibrated, can vary between runs, and can be confidently wrong. Rules cannot read language, but they are deterministic, auditable, and can refuse. Dividing the work plays to both strengths.
 
-**H2: The model never moves the workflow.** Choosing the right action is only half the risk. The other half is carrying it out: acting on a stale fact, running a step out of order, or moving money twice. An explicit finite state machine turns "only the rules' decision and the ledger's facts move the workflow" into structure:
+**H2: The model never moves the workflow.** Choosing the right action is only half the risk. The other half is carrying it out: acting on a stale fact, running a step out of order, or moving money twice. An explicit finite state machine turns "only the rules' decision and the ledger's facts move the workflow" into structure. The neuro-symbolic step is one state, `routing`: the models propose and the rules decide inside it, and its only exit is the rules' decision. So:
 - events that are not allowed from the current state are rejected;
 - facts are re-checked when the action runs, not when it was requested (a wire is authorized only if the account is still open and the funds still cover it);
 - final states are final, and money moves once.
 
-In many agent designs the model chooses the next step. Here the model's output is only an input to the rules, and the state machine only accepts the rules' decision.
+In many agent designs the model chooses the next step. Here the model's output is only an input to the rules inside `routing`, and the transition out of `routing` is chosen by the rules' decision alone.
 
 **How we will test it (not done yet):**
 - Compare with a model-only baseline on a labelled set of sentences.
@@ -30,26 +30,31 @@ In many agent designs the model chooses the next step. Here the model's output i
 ## Approach
 
 ```
-                    user's sentence
-                          │
-                          ▼
-  ┌──────────────── NEURAL · propose ────────────────┐
-  │  What is being asked? How many requests?         │
-  └────────────────────────┬─────────────────────────┘
-                           │ proposed action
-                           ▼
-  ┌──────────────── SYMBOLIC · decide ───────────────┐
-  │  Inside the contract? Which request first?       │
-  │  Allowed for this session and balance?           │
-  └────────────────────────┬─────────────────────────┘
-                           │ decision (deny / execute)
-                           ▼
-  ┌────────────── STATE MACHINE · execute ───────────┐
-  │  received ─┬─► refused                           │
-  │            └─► executing ─┬─► completed          │
-  │                           └─► failed             │
-  │  facts re-checked at execution; debit once       │
-  └──────────────────────────────────────────────────┘
+                      user's sentence
+                            │
+                            ▼
+┌────────────────────── STATE MACHINE ───────────────────────┐
+│                                                            │
+│ received                                                   │
+│    │ start                                                 │
+│    ▼                                                       │
+│ ┌──────────────────── routing ────────────────────┐        │
+│ │  NEURAL · propose                               │        │
+│ │    What is being asked? How many requests?      │        │
+│ │  SYMBOLIC · decide                              │        │
+│ │    Inside the contract? Which request first?    │        │
+│ │    Allowed for this session and balance?        │        │
+│ └────────────────────────┬────────────────────────┘        │
+│                          │ decision                        │
+│             ┌────────────┴────────────┐                    │
+│           deny                     execute                 │
+│             ▼                         ▼                    │
+│          refused                  executing                │
+│                            facts re-checked; debit once    │
+│                                  ├──► completed            │
+│                                  └──► failed               │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
 ```
 
 
@@ -58,7 +63,7 @@ In many agent designs the model chooses the next step. Here the model's output i
   - Policy rules check the session and the ledger.
   - A fixed precedence rule orders multiple requests.
   - Contract checks reject any model output outside the catalog or outside its expected shape.
-- **A state machine executes.** Every request goes through `RequestWorkflow`: `received`, then `refused` or `executing`, then `completed` or `failed`. The router's decision is the only event that moves it out of `received`. While executing, a wire runs its own `WireTransfer` (drafted, authorized, submitted, settled), and a deletion closes the account in the ledger.
+- **A state machine holds it all.** Every request goes through `RequestWorkflow`: `received` → `routing` → `refused` or `executing` → `completed` or `failed`. `routing` is one state in which the neural and symbolic parts work together (it runs `route()`), and the rules' decision is its only exit. While executing, a wire runs its own `WireTransfer` (drafted, authorized, submitted, settled), and a deletion closes the account in the ledger.
 
 The design fails closed. A sentence is denied when a model is unsure, unavailable, or answers outside its contract, and when an amount cannot be parsed. That is a deliberate cost to recall: for a bank, refusing and asking again costs less than acting wrongly.
 
@@ -78,7 +83,7 @@ Next steps:
 | `src/router.py` | `route()` and `decide()`: orchestration, with no model code |
 | `src/contracts.py` | The roles models must implement, and the checks on their output |
 | `src/policy.py` | Catalog, precedence rule and banking policy (symbolic) |
-| `src/workflow.py` | `RequestWorkflow` state machine: from the router's decision to its effect |
+| `src/workflow.py` | `RequestWorkflow` state machine: from the sentence, through routing, to its effect |
 | `src/transfer.py` | `WireTransfer` state machine, and the ledger (balances, once-only debits, closed accounts) |
 | `src/jev.py`, `src/minilm.py`, `src/intent_understanding.py` | Model adapters (neural). `intent_understanding.py` also holds a separate experiment in reading a whole sentence. |
 | `src/demo.py` | Wires the models together and runs three sessions |
@@ -101,7 +106,7 @@ The router never names a model. `src/contracts.py` defines four roles as `Protoc
 
 Both checks were confirmed by planting each violation in `jev.py`.
 
-Arrows mean "imports". Everything points to `contracts.py`, and nothing in it points back. The adapters (the details) and `router.py` (the high-level rules) both depend on the same abstraction, and neither depends on the other. Two kinds of arrows are left out: the adapters read the action catalog from `policy.py`, and `demo.py` also imports `policy.py` and `transfer.py` to build the sessions and the ledger. `workflow.py` is not drawn either: it sits beside the router, takes the router's `Decision`, and uses `transfer.py` to carry it out. `demo.py` runs every decision through it.
+Arrows mean "imports". Everything points to `contracts.py`, and nothing in it points back. The adapters (the details) and `router.py` (the high-level rules) both depend on the same abstraction, and neither depends on the other. Two kinds of arrows are left out: the adapters read the action catalog from `policy.py`, and `demo.py` also imports `policy.py` and `transfer.py` to build the sessions and the ledger. `workflow.py` is not drawn either: it sits above the router, runs `route()` in its `routing` state, and uses `transfer.py` to carry out the decision. `demo.py` starts every request through it.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -153,7 +158,7 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 - **One classifier call per sentence.** That call returns both the action and the request count. A second call happens only when there are several requests, and it labels all of them at once.
 - **A rule, not a model, orders requests.** `ACTION_PRECEDENCE` in `policy.py` puts reads, then the wire, then deletion, then `none`. Only the first request is decided. The rest are listed as follow-ups and never run on their own.
 - **No human confirmation step.** It would catch the router's mistakes and hide them from any measurement. The router is judged on its own decision. Human-in-the-loop could be tested later as a separate hypothesis.
-- **Deciding is not a state; executing is.** `route()` is a pure function with nothing to wait for between its steps. Its `Decision` is the event that moves `RequestWorkflow`, whose states are the situations a request can be in.
+- **Neural and symbolic share one state.** `routing` runs the whole propose-and-decide step, because a state needs one clear exit: the rules' decision, `deny` or `execute`. Splitting "propose" and "decide" into separate states would give the models' output its own transition. Inside `routing`, `route()` stays a pure function.
 - **Policy is pure.** `policy.decide(text, action, session, ledger)` judges an action that has already been chosen, with no model code.
 - **Keys stay with their adapter.** `jev.py` and `minilm.py` each load their own key from `.env`. The router loads nothing.
 
@@ -193,7 +198,7 @@ uv run pytest tests/test_intent_understanding.py -m integration -s
 
 1. A `none` action is denied with "no matching action". Banking rules do not run. For Jev, an answer under 0.5 confidence has already become `none` inside the adapter.
 2. For a catalog action, the explainer (MiniLM) scores the sentence against the written action descriptions. The scores are printed beside the classifier's and never change the choice.
-3. `policy.decide()` uses the session and the ledger. A wire needs authentication, an active account, a parsed amount, an allowlisted payee, and enough balance. A deletion needs an authenticated admin. An allowed action is then executed by `RequestWorkflow` in `src/workflow.py`, which re-checks the facts at that moment. A wire runs `WireTransfer` (drafted, authorized, submitted, settled); authorization requires the account to be open and the funds to cover the amount, and the ledger debits on settle, once per transfer id. A deletion closes the account, so later wires on it are refused. There is no human confirmation step: the router is judged on its own decision.
+3. `policy.decide()` uses the session and the ledger. A wire needs authentication, an active account, a parsed amount, an allowlisted payee, and enough balance. A deletion needs an authenticated admin. `route()` runs inside the `routing` state of `RequestWorkflow` (`src/workflow.py`). An allowed action then moves the workflow to `executing`, which re-checks the facts at that moment. A wire runs `WireTransfer` (drafted, authorized, submitted, settled); authorization requires the account to be open and the funds to cover the amount, and the ledger debits on settle, once per transfer id. A deletion closes the account, so later wires on it are refused. There is no human confirmation step: the router is judged on its own decision.
 
 The chart shows calls at runtime. The Architecture section shows which module imports which.
 
@@ -248,12 +253,12 @@ The chart shows calls at runtime. The Architecture section shows which module im
           └────────────────┬─────────────────┘
                            ▼
           Decision (+ follow_ups if not denied)
-                           │
+                           │ exit of the routing state
                            ▼
           ┌──────────────────────────────────┐
           │ RequestWorkflow      workflow.py │
-          │ received ─ decided ─┬─► refused  │
-          │                     └─► executing│
+          │ routing ─ deny ────► refused     │
+          │         └ execute ─► executing   │
           │ executing ─┬─► completed         │
           │            └─► failed            │
           │ wire: WireTransfer   transfer.py │
@@ -400,9 +405,10 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 | route_none_label_is_ordered_last | A `none` label goes last | unit |
 | live_jev_abstains_on_unrelated_sentence | Real Jev returns `none` for "capital of Portugal" | integration |
 | `test_workflow.py` | | |
-| denied_request_is_refused_and_never_executes | A denial ends in `refused` and moves no money | unit |
-| approved_wire_completes_with_one_debit | An approved wire ends in `completed` with one debit | unit |
-| wire_fails_when_funds_vanish_after_the_decision | Funds are re-checked at execution; the wire fails, no debit | unit |
+| denied_request_is_refused_and_never_executes | Path received → routing → refused; no money moves | unit |
+| unavailable_classifier_is_refused_in_routing | A classifier that is down ends the request in `refused`, from `routing` | unit |
+| approved_wire_completes_with_one_debit | Path received → routing → executing → completed; one debit | unit |
+| wire_fails_when_funds_vanish_after_routing | The balance drops after routing decided; execution re-checks it and fails, no debit | unit |
 | closed_account_blocks_a_later_wire | A deletion closes the account; a later wire fails | unit |
 | closing_twice_fails_the_second_time | A closed account cannot be closed again | unit |
 | `test_jev.py` | | |

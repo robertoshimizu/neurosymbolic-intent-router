@@ -8,7 +8,7 @@ from intent_understanding import MedGemmaSplitter
 from jev import JevClassifier
 from minilm import MiniLMExplainer
 from policy import Session
-from router import Decision, route
+from router import Decision
 from transfer import Ledger
 from workflow import RequestWorkflow
 
@@ -119,13 +119,14 @@ if __name__ == "__main__":
 
     for key in ("guest", "zero", "funded"):
         session = sessions[key]
-        decision = route(utterance, session, ledger, classifier=classifier,
-                         labeler=classifier, splitter=splitter, explainer=explainer)
         balance = ledger.get_balance(session.account_id)
+        workflow = RequestWorkflow(
+            utterance, session, ledger, request_id=f"request-{key}",
+            classifier=classifier, labeler=classifier, splitter=splitter, explainer=explainer,
+        )
+        workflow.send("start")
         print(f"\n--- Session '{key}' (balance=${balance}) ---")
-        print_decision(utterance, session, decision)
-
-        workflow = RequestWorkflow(decision, session, ledger, request_id=f"request-{key}")
-        workflow.send("decided")
-        state = next(iter(workflow.configuration)).id
-        print(f"Workflow: {state} ({workflow.note}). Balance now ${ledger.get_balance(session.account_id)}")
+        if workflow.decision is not None:
+            print_decision(utterance, session, workflow.decision)
+        print(f"Workflow: {' -> '.join(workflow.path)} ({workflow.note}). "
+              f"Balance now ${ledger.get_balance(session.account_id)}")
