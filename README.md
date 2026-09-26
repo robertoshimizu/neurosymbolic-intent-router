@@ -247,6 +247,7 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 - **The explainer never votes.** MiniLM's scores are printed beside the classifier's, and a disagreement is labelled a description gap. It never changes the decision, and if it fails the decision goes ahead without the note (`explainer=unavailable` in the trace).
 - **The splitter has one narrow job.** MedGemma only rewrites a sentence into separate requests. When it also chose actions, it copied the catalog descriptions and lost "$500", so labelling stays with the classifier.
 - **One classifier call per sentence.** That call returns both the action and the request count. A second call happens only when there are several requests, and it labels all of them at once.
+- **One table holds the rules.** Each action in `policy.py`'s `RULES` has its description, its precedence and its checks, run in order until one denies. Adding an action means adding one entry. `ACTION_CATALOG` and `ACTION_PRECEDENCE` are built from it.
 - **A rule, not a model, orders requests.** `ACTION_PRECEDENCE` in `policy.py` puts reads, then the wire, then deletion, then `none`. Only the first request is decided. The rest are listed as follow-ups and never run on their own.
 - **No human confirmation step.** It would catch the router's mistakes and hide them from any measurement. The router is judged on its own decision. Human-in-the-loop could be tested later as a separate hypothesis.
 - **Neural and symbolic share one state.** `routing` runs the whole interpret-and-decide step, because a state needs one clear exit: the rules' decision, `deny` or `execute`. Splitting "interpret" and "decide" into separate states would give the models' reading its own transition. Inside `routing`, `route()` stays a pure function.
@@ -255,7 +256,6 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 
 ### Known limits of this design
 
-- A new action means editing `ACTION_CATALOG`, `ACTION_PRECEDENCE` and the `if action == ...` branches in `policy.py`. That is deliberately left for later.
 - Pyright runs in `standard` mode, not `strict`. It checks every signature against the contracts, but it does not require every value to be typed.
 
 ## Run

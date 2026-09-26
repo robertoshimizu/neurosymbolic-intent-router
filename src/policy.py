@@ -5,28 +5,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
+from typing import Callable, Literal
 
 from transfer import Ledger
 
 NONE_ACTION = "none"
-
-ACTION_CATALOG: dict[str, str] = {
-    "wire_transfer_funds": "Send money by wire transfer to an external bank account",
-    "view_account_balance": "Show the current account balance",
-    "delete_account": "Permanently delete the user account",
-    "view_public_faq": "Open the public frequently asked questions page",
-}
-
-
-# Logical order for several requests: reads, then money movement, then deletion.
-# Ties keep the written order. `none` goes last so a real action runs first.
-ACTION_PRECEDENCE: dict[str, int] = {
-    "view_public_faq": 0,
-    "view_account_balance": 0,
-    "wire_transfer_funds": 1,
-    "delete_account": 2,
-}
 
 AMOUNT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
 
@@ -76,6 +59,85 @@ def parse_request(utterance: str, payee_allowlist: tuple[str, ...]) -> ParsedReq
     return ParsedRequest(amount=amount, payee=payee)
 
 
+# A check returns a denial reason, or None when it passes.
+Check = Callable[[Session, Decimal, ParsedRequest], str | None]
+
+
+def require_authenticated(session: Session, balance: Decimal, parsed: ParsedRequest) -> str | None:
+    return None if session.is_authenticated else "caller is not authenticated"
+
+
+def require_active(session: Session, balance: Decimal, parsed: ParsedRequest) -> str | None:
+    return None if session.status == "active" else "account is not active"
+
+
+def require_amount(session: Session, balance: Decimal, parsed: ParsedRequest) -> str | None:
+    if parsed.amount is None or parsed.amount <= 0:
+        return "transfer amount is missing or invalid"
+    return None
+
+
+def require_payee(session: Session, balance: Decimal, parsed: ParsedRequest) -> str | None:
+    return None if parsed.payee is not None else "payee is not on the allowlist"
+
+
+def require_funds(session: Session, balance: Decimal, parsed: ParsedRequest) -> str | None:
+    if parsed.amount is not None and parsed.amount > balance:
+        return "insufficient funds for the requested amount"
+    return None
+
+
+def require_admin(session: Session, balance: Decimal, parsed: ParsedRequest) -> str | None:
+    if session.is_authenticated and session.role == "admin":
+        return None
+    return "delete requires an authenticated admin"
+
+
+@dataclass(frozen=True)
+class ActionRule:
+    """Everything the rules know about one action. Checks run in order; the first failure denies."""
+
+    description: str
+    precedence: int
+    checks: tuple[Check, ...]
+    permitted: str
+
+
+# Adding an action means adding one entry here.
+# Precedence orders several requests: reads, then money movement, then deletion.
+RULES: dict[str, ActionRule] = {
+    "wire_transfer_funds": ActionRule(
+        "Send money by wire transfer to an external bank account",
+        1,
+        (require_authenticated, require_active, require_amount, require_payee, require_funds),
+        "wire transfer permitted",
+    ),
+    "view_account_balance": ActionRule(
+        "Show the current account balance",
+        0,
+        (require_authenticated,),
+        "balance view permitted",
+    ),
+    "delete_account": ActionRule(
+        "Permanently delete the user account",
+        2,
+        (require_admin,),
+        "account deletion permitted",
+    ),
+    "view_public_faq": ActionRule(
+        "Open the public frequently asked questions page",
+        0,
+        (),
+        "public faq always allowed",
+    ),
+}
+
+ACTION_CATALOG: dict[str, str] = {action: rule.description for action, rule in RULES.items()}
+
+# Ties keep the written order. `none` is absent, so callers sort it last.
+ACTION_PRECEDENCE: dict[str, int] = {action: rule.precedence for action, rule in RULES.items()}
+
+
 def evaluate_action(
     action: str,
     session: Session,
@@ -83,33 +145,14 @@ def evaluate_action(
     parsed: ParsedRequest,
 ) -> tuple[bool, str]:
     """Return (allowed, reason) for one catalog action against session facts."""
-    if action == "wire_transfer_funds":
-        if not session.is_authenticated:
-            return False, "caller is not authenticated"
-        if session.status != "active":
-            return False, "account is not active"
-        if parsed.amount is None or parsed.amount <= 0:
-            return False, "transfer amount is missing or invalid"
-        if parsed.payee is None:
-            return False, "payee is not on the allowlist"
-        if parsed.amount > balance:
-            return False, "insufficient funds for the requested amount"
-        return True, "wire transfer permitted"
-
-    if action == "delete_account":
-        if not (session.is_authenticated and session.role == "admin"):
-            return False, "delete requires an authenticated admin"
-        return True, "account deletion permitted"
-
-    if action == "view_account_balance":
-        if not session.is_authenticated:
-            return False, "caller is not authenticated"
-        return True, "balance view permitted"
-
-    if action == "view_public_faq":
-        return True, "public faq always allowed"
-
-    return False, "unknown action denied"
+    rule = RULES.get(action)
+    if rule is None:
+        return False, "unknown action denied"
+    for check in rule.checks:
+        reason = check(session, balance, parsed)
+        if reason is not None:
+            return False, reason
+    return True, rule.permitted
 
 
 def decide(text: str, action: str, session: Session, ledger: Ledger) -> Verdict:
