@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from pathlib import Path
 from typing import Protocol
-
-from dotenv import load_dotenv
 
 import policy
 from policy import (
@@ -20,23 +17,7 @@ from policy import (
     evaluate_action,
     parse_request,
 )
-from transfer import Ledger, WireTransfer, confirm_or_refuse
-
-_ENV_LOADED = False
-
-
-def _load_env() -> None:
-    """Load project .env so Hub and TypeSafe clients can read their API keys."""
-    global _ENV_LOADED
-    if _ENV_LOADED:
-        return
-    env_path = Path(__file__).resolve().parents[1] / ".env"
-    load_dotenv(env_path, override=False)
-    _ENV_LOADED = True
-
-
-_load_env()
-
+from transfer import Ledger
 
 @dataclass(frozen=True)
 class DescriptionMatch:
@@ -303,140 +284,3 @@ def route(
     follow_ups = () if first.outcome == "deny" else tuple(
         requests[i] for i in ordered[1:])
     return replace(first, rule_trace=trace + first.rule_trace, follow_ups=follow_ups)
-
-
-def print_decision(utterance: str, session: Session, decision: Decision) -> None:
-    print(f"\nUser Query: '{utterance}'")
-    print(
-        f"Context: Auth={session.is_authenticated}, Role='{session.role}', "
-        f"Status='{session.status}', Account='{session.account_id}'"
-    )
-    show_similarity = decision.description_match is not None
-    print(f"\nClassifier: {decision.source}")
-    print("\nAction Decision Matrix:")
-    if show_similarity:
-        print(
-            f"{'Candidate Action':<24} | {'Classifier Score':<16} | "
-            f"{'Explainer Score':<15} | {'Allowed?':<8}"
-        )
-        print("-" * 74)
-    else:
-        print(
-            f"{'Candidate Action':<24} | {'Classifier Score':<16} | {'Allowed?':<8}"
-        )
-        print("-" * 56)
-    for act, score in sorted(
-        decision.scores.items(), key=lambda item: item[1], reverse=True
-    ):
-        if not decision.permissions:
-            allowed_str = "—"
-        else:
-            allowed_str = "YES" if decision.permissions.get(
-                act, False) else "NO"
-        if show_similarity:
-            explained = decision.description_match.similarities.get(act)
-            explained_str = f"{explained:.4f}" if explained is not None else "—"
-            print(
-                f"{act:<24} | {score:<16.4f} | {explained_str:<15} | {allowed_str:<8}"
-            )
-        else:
-            print(f"{act:<24} | {score:<16.4f} | {allowed_str:<8}")
-
-    print(
-        f"\nDecision: action={decision.action} outcome={decision.outcome} "
-        f"reason={decision.reason}"
-    )
-    if decision.description_match is not None:
-        match = decision.description_match
-        if match.agrees and not match.description_gap:
-            print(
-                f"Explainer agrees: {match.nearest} score={match.chosen_score:.4f}"
-            )
-        else:
-            print(
-                "Description gap: "
-                f"explainer nearest={match.nearest} ({match.nearest_score:.4f}); "
-                f"chosen action score={match.chosen_score:.4f}"
-            )
-    if decision.follow_ups:
-        print("You also asked (ask again to proceed):")
-        for follow_up in decision.follow_ups:
-            print(f"  - {follow_up}")
-    if decision.suggestion:
-        print(f"Suggestion: {decision.suggestion}")
-    print()
-
-
-def build_demo_world() -> tuple[dict[str, Session], Ledger]:
-    ledger = Ledger()
-    ledger.set_balance("acct-guest", Decimal("0"))
-    ledger.set_balance("acct-zero", Decimal("0"))
-    ledger.set_balance("acct-funded", Decimal("10000"))
-
-    sessions = {
-        "guest": Session(
-            session_id="guest",
-            is_authenticated=False,
-            role="guest",
-            status="inactive",
-            account_id="acct-guest",
-            payee_allowlist=(),
-        ),
-        "zero": Session(
-            session_id="zero",
-            is_authenticated=True,
-            role="customer",
-            status="active",
-            account_id="acct-zero",
-            payee_allowlist=("external bank account",),
-        ),
-        "funded": Session(
-            session_id="funded",
-            is_authenticated=True,
-            role="customer",
-            status="active",
-            account_id="acct-funded",
-            payee_allowlist=("external bank account",),
-        ),
-    }
-    return sessions, ledger
-
-
-if __name__ == "__main__":
-    from intent_understanding import MedGemmaSplitter
-    from jev import JevClassifier
-    from minilm import MiniLMExplainer
-
-    utterance = "Close this account and send $500 to my external bank account."
-    sessions, ledger = build_demo_world()
-    classifier = JevClassifier()
-    explainer = MiniLMExplainer()
-    splitter = MedGemmaSplitter()
-
-    for key in ("guest", "zero", "funded"):
-        session = sessions[key]
-        decision = route(utterance, session, ledger,
-                         classifier=classifier, explainer=explainer, splitter=splitter)
-        balance = ledger.get_balance(session.account_id)
-        print(f"\n--- Session '{key}' (balance=${balance}) ---")
-        print_decision(utterance, session, decision)
-
-        if decision.outcome == "needs_confirmation" and decision.action == (
-            "wire_transfer_funds"
-        ):
-            assert decision.parsed.amount is not None
-            transfer = WireTransfer(
-                ledger=ledger,
-                account_id=session.account_id,
-                amount=decision.parsed.amount,
-                transfer_id="wire-demo-1",
-            )
-            transfer.send("request_confirmation")
-            confirmed = confirm_or_refuse(transfer)
-            print(f"Confirmation accepted: {confirmed}")
-            if confirmed:
-                transfer.send("submit")
-                transfer.send("settle")
-                print(
-                    f"Settled. New balance: ${ledger.get_balance(session.account_id)}"
-                )

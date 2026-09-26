@@ -7,7 +7,7 @@ Two pieces of work sit side by side. They meet in one place: `route()` uses the 
 - `src/router.py`, `src/policy.py` and `src/transfer.py` route a banking sentence. A classifier proposes an action. Rules about the session and the ledger decide whether that action may run. A wire then moves through a state machine and debits an in-memory balance once.
 - `src/intent_understanding.py` is a separate reading of a sentence. It asks a local model what the text supports. Only its `MedGemmaSplitter` is used by the router.
 
-The router depends on three roles, not on models. Each role is a small `Protocol` in `router.py`, and each model sits in its own file. Only the `__main__` demo names the models.
+The router depends on three roles, not on models. Each role is a small `Protocol` in `router.py`, and each model sits in its own file. Only `src/demo.py`, the entry point that wires the models in, names them.
 
 | Role | Contract | Today | File |
 |---|---|---|---|
@@ -23,7 +23,7 @@ Each adapter keeps its own calibration. Jev's 0.5 confidence floor lives in `jev
 
 ```bash
 uv sync
-uv run python src/router.py
+uv run python src/demo.py
 uv run python src/coffee.py
 uv run pytest -m "not integration"
 ```
@@ -103,7 +103,7 @@ If the classifier is missing or cannot be called, the sentence is denied with "c
                Decision (+ follow_ups if not denied)
                              │
                              ▼
-               print_decision()   (the __main__ demo)
+               print_decision()   (src/demo.py)
                              │
             needs_confirmation + wire?
                              ▼

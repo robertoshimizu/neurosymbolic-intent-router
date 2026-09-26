@@ -5,9 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+from dotenv import load_dotenv
 
-from router import DescriptionMatch
 from policy import ACTION_CATALOG
+from router import DescriptionMatch
+
+# HF_TOKEN for Hub downloads comes from the project .env, never from code.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 # Hub download cache (safetensors live here after the first fetch).

@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
+from pathlib import Path
 
-from router import IntentRank
+from dotenv import load_dotenv
+
 from policy import ACTION_CATALOG, NONE_ACTION
+from router import IntentRank
+
+# TYPESAFE_API_KEY comes from the project .env, never from code.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 # Jev confidence is a probability, not a cosine. Docs treat values under 0.5 as unsure.
 MIN_CONFIDENCE = 0.5
