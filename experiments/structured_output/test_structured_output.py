@@ -8,8 +8,8 @@ Two approaches, same schemas, same sentences:
 Only the shape is asserted. Accuracy, retries and time are printed, because
 they vary between runs. Nothing in src/ uses this file.
 
-    uv run pytest experiments/structured_output/test_structured_output.py -m ollama -s
-    OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest experiments/structured_output/test_structured_output.py -m ollama -s
+    uv run --group experiments pytest experiments/structured_output/test_structured_output.py -m ollama -s
+    OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run --group experiments pytest experiments/structured_output/test_structured_output.py -m ollama -s
 """
 
 from __future__ import annotations

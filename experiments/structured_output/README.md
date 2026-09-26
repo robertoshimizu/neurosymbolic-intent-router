@@ -38,6 +38,6 @@ Every answer in every run had a valid shape, and Instructor never retried. The f
 **Limits.** One run per model, 11 fairly clear sentences. This shows that the format is reliable, not that accuracy holds on mixed or tricky sentences or from one run to the next.
 
 ```bash
-uv run pytest experiments/structured_output/test_structured_output.py -m ollama -s
-OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest experiments/structured_output/test_structured_output.py -m ollama -s
+uv run --group experiments pytest experiments/structured_output/test_structured_output.py -m ollama -s
+OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run --group experiments pytest experiments/structured_output/test_structured_output.py -m ollama -s
 ```

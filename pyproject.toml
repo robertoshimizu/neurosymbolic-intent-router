@@ -7,16 +7,21 @@ dependencies = [
     "numpy>=2.4.6",
     "python-dotenv>=1.2.3",
     "python-statemachine>=3.2.1",
-    "sentence-transformers>=6.1.0",
+    "sentence-transformers>=5.7.0,<6",
     "typesafe-sdk>=0.7.1",
 ]
 
 [dependency-groups]
 dev = [
-    "instructor>=1.17.0",
-    "openai>=3.3.0",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
+]
+experiments = [
+    "gliner2[local]>=2.0.0",
+    "instructor>=1.17.0",
+    "openai>=3.3.0",
+    "protobuf>=7.36.2",
+    "sentencepiece>=0.2.2",
 ]
 
 [tool.pytest.ini_options]
@@ -25,6 +30,7 @@ testpaths = ["tests"]
 markers = [
     "integration: loads the sentence-transformers MiniLM model",
     "ollama: structured-output experiment against a local Ollama model (slow)",
+    "gliner: GLiNER2.5 extraction experiment; needs uv run --group experiments",
     "prolog: needs SWI-Prolog; run with uv run --env-file .env",
 ]
 
