@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from contracts import Policy, PolicyResult
-from policy import RULES, ParsedRequest, Session, denials, suggestion
+from policy import RULES, ParsedRequest, Session, denials, ordered, suggestion
 
 
 class PythonPolicy(Policy):
@@ -22,3 +22,6 @@ class PythonPolicy(Policy):
                 suggestion=suggestion(action, session, balance, parsed),
             )
         return PolicyResult(allowed=True, reasons=(RULES[action].permitted,))
+
+    def order(self, actions: tuple[str, ...]) -> tuple[int, ...]:
+        return ordered(actions)

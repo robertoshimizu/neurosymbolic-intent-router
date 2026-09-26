@@ -53,3 +53,15 @@ def test_prolog_policy_agrees_with_python_policy(prolog_policy: Policy) -> None:
         != (got := prolog_policy.evaluate(action, session, balance, parsed))
     ]
     assert not mismatches, f"{len(mismatches)} of {len(cases)} cases differ; first: {mismatches[0]}"
+
+
+@pytest.mark.prolog
+def test_prolog_policy_orders_requests_like_python_policy(prolog_policy: Policy) -> None:
+    reference = PythonPolicy()
+    sequences = [seq for n in (2, 3) for seq in itertools.product(ACTIONS, repeat=n)]
+    mismatches = [
+        (seq, expected, got)
+        for seq in sequences
+        if (expected := reference.order(seq)) != (got := prolog_policy.order(seq))
+    ]
+    assert not mismatches, f"{len(mismatches)} of {len(sequences)} orders differ; first: {mismatches[0]}"

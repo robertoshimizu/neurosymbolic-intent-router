@@ -8,7 +8,6 @@ from decimal import Decimal
 from contracts import Classifier, DescriptionMatch, Explainer, IntentRank, Labeler, Policy, PolicyResult, Splitter
 from policy import (
     ACTION_CATALOG,
-    ACTION_PRECEDENCE,
     NONE_ACTION,
     Outcome,
     ParsedRequest,
@@ -216,7 +215,7 @@ def route(
     explainer: Explainer | None = None,
 ) -> Decision:
     """One classifier call. Several requests: the splitter separates them, the labeler labels them in one call,
-    the rule orders, policy decides the first, and the rest are listed.
+    the policy orders them and decides the first, and the rest are listed.
     Never mutates the ledger.
     """
     rank = _classify(utterance, classifier)
@@ -240,8 +239,13 @@ def route(
         return _deny_split(utterance, session, "several requests could not be labeled", [f"split_count={len(requests)}"])
 
     labels = [r.action for r in ranks]
-    ordered = sorted(range(len(requests)), key=lambda i: ACTION_PRECEDENCE.get(
-        labels[i], len(ACTION_PRECEDENCE)))
+    try:
+        ordered = list(policy.order(tuple(labels)))
+    except Exception:
+        ordered = []
+    if sorted(ordered) != list(range(len(requests))):
+        # The reasoner must return each position once; anything else is not an order.
+        return _deny_split(utterance, session, "several requests could not be ordered", [f"split_count={len(requests)}"])
     head = ordered[0]
     first = decide(requests[head], session, ledger,
                    policy=policy, explainer=explainer, rank=ranks[head])

@@ -112,9 +112,14 @@ class PolicyResult:
 
 
 class Policy(Protocol):
-    """Judges one action against session facts. The router does not know which reasoner answers."""
+    """Judges one action against session facts, and orders several requests. The router does not know which reasoner answers."""
 
     @abstractmethod
     def evaluate(
         self, action: str, session: Session, balance: Decimal, parsed: ParsedRequest
     ) -> PolicyResult: ...
+
+    @abstractmethod
+    def order(self, actions: tuple[str, ...]) -> tuple[int, ...]:
+        """Positions of `actions` in the order they should be handled. Ties keep the written order."""
+        ...

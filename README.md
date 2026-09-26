@@ -63,7 +63,7 @@ In many agent designs the model chooses the next step. Here the model's output i
 - **Neural parts interpret.** A classifier reads which catalog intent the text expresses (or none) and counts the requests, a splitter separates a sentence with several requests, and an explainer shows how close the sentence is to each intent's description. None of them chooses or authorizes an action. Each is a swappable model behind a contract (Jev, MedGemma and MiniLM today).
 - **Symbolic parts decide.**
   - Policy rules check the session and the ledger. The reasoner is swappable: SWI-Prolog (`policy.pl`) by default, or the same rules in Python.
-  - A fixed precedence rule orders multiple requests.
+  - A fixed precedence rule, part of the same reasoner, orders multiple requests.
   - Contract checks reject classifier and labeler output outside the catalog or outside its expected shape.
 - **A state machine holds it all.** Every request goes through `RequestWorkflow`: `received` → `routing` → `refused` or `executing` → `completed` or `failed`. `routing` is one state in which the neural and symbolic parts work together (it runs `route()`), and the rules' decision is its only exit. While executing, a wire runs its own `WireTransfer` (drafted, authorized, submitted, settled), and a deletion closes the account in the ledger.
 
@@ -193,7 +193,7 @@ The router never names a model or a reasoner. `src/contracts.py` defines five ro
 | Labeler | `label(texts)`: one action per request, in one call. `None` means unavailable. | Jev | `src/jev.py` |
 | Splitter | `split(text)`: the separate requests, in the order written | MedGemma | `src/intent_understanding.py` |
 | Explainer | `explain(text, action)`: a display-only note on the chosen action | MiniLM | `src/minilm.py` |
-| Policy | `evaluate(action, session, balance, parsed)`: allowed or not, every reason, and a permitted action to suggest | SWI-Prolog (default), Python | `src/prolog_policy.py`, `src/python_policy.py` |
+| Policy | `evaluate(action, session, balance, parsed)`: allowed or not, every reason, and a permitted action to suggest. `order(actions)`: the handling order of several requests, as positions | SWI-Prolog (default), Python | `src/prolog_policy.py`, `src/python_policy.py` |
 
 **How the contract is enforced.** Python checks two different things, at two different times:
 - **A missing method** fails when the adapter is created. Every role method is an `@abstractmethod`, and each adapter subclasses its role explicitly (`class JevClassifier(Classifier, Labeler)`). Leaving out `label` raises `TypeError: Can't instantiate abstract class`.
@@ -235,7 +235,7 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ policy.py      catalog · ACTION_PRECEDENCE · Session · parse_request     │
+│ policy.py      catalog · Session · ParsedRequest · parse_request         │
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -258,7 +258,7 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 - **One table holds the rules.** Each action in `policy.py`'s `RULES` has its description, its precedence and its checks. Adding an action means adding one entry there and its clauses in `policy.pl`. `ACTION_CATALOG` and `ACTION_PRECEDENCE` are built from it.
 - **Every reason, not the first.** A denial lists every rule that failed, in a fixed order. A caller who is not authenticated and has no money is told both.
 - **The rules choose the suggestion.** After a denial, the reasoner may offer one other action, and only one it would itself permit: a wire denied for insufficient funds suggests the balance view, unless the caller may not see it. The router passes it through and does not read the reasons' text.
-- **A rule, not a model, orders requests.** `ACTION_PRECEDENCE` in `policy.py` puts reads, then the wire, then deletion, then `none`. Only the first request is decided. The rest are listed as follow-ups and never run on their own.
+- **A rule, not a model, orders requests.** The reasoner's `order()` puts reads, then the wire, then deletion, then `none`; ties keep the written order. In Prolog these are `precedence/2` facts and `ordered/2`; in Python, `ACTION_PRECEDENCE`. It returns positions, not action names, so two requests for the same action stay distinct. An answer that is not each position exactly once is denied. Only the first request is decided. The rest are listed as follow-ups and never run on their own.
 - **No human confirmation step.** It would catch the router's mistakes and hide them from any measurement. The router is judged on its own decision. Human-in-the-loop could be tested later as a separate hypothesis.
 - **Neural and symbolic share one state.** `routing` runs the whole interpret-and-decide step, because a state needs one clear exit: the rules' decision, `deny` or `execute`. Splitting "interpret" and "decide" into separate states would give the models' reading its own transition. Inside `routing`, `route()` stays a pure function.
 - **Policy is pure.** A reasoner judges an action that has already been chosen, from the session, the balance and the parsed request. It holds no model code and never writes to the ledger.
@@ -267,7 +267,7 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 ### Known limits of this design
 
 - Pyright runs in `standard` mode, not `strict`. It checks every signature against the contracts, but it does not require every value to be typed.
-- The precedence rule and amount parsing are still Python only, outside the swappable reasoner.
+- Amount parsing is still Python only, outside the swappable reasoner.
 - The SWI-Prolog.app runtime on macOS finds its libraries only if `DYLD_FALLBACK_LIBRARY_PATH` is set when the process starts, so commands that load Prolog run with `uv run --env-file .env`.
 
 ## Run
@@ -299,7 +299,7 @@ uv run pytest tests/test_intent_understanding.py -m integration -s
 1. The classifier receives the sentence in one call. Jev answers two closed questions: which action (the four catalog actions plus `none`), and how many requests the sentence makes (`none`, `one`, `several`). Identity, role, and balance are not sent. If the classifier is missing or down, the sentence is denied with "classifier unavailable".
 2. If the count is not `several`, the sentence goes straight to `decide()` with that answer. Most sentences stop here.
 3. If the count is `several`, the splitter (MedGemma) rewrites the sentence as plain requests in the user's own words. It does not choose actions. The labeler (also Jev) then labels every request in one call.
-4. `ACTION_PRECEDENCE` orders the requests: reads, then the wire, then deletion, then `none`. Only the first goes to `decide()`. The others are listed as follow-ups and are not evaluated. If the first is denied, nothing is listed. If the split or the labelling fails, the sentence is denied.
+4. The injected `Policy` orders the requests: reads, then the wire, then deletion, then `none`. Only the first goes to `decide()`. The others are listed as follow-ups and are not evaluated. If the first is denied, nothing is listed. If the split, the labelling or the ordering fails, the sentence is denied.
 
 `decide()` then applies the rules.
 
@@ -339,11 +339,12 @@ The chart shows calls at runtime. The Architecture section shows which module im
                │           fails ──────────► DENY
                │                        ▼
                │       ┌──────────────────────────────────┐
-               │       │ ACTION_PRECEDENCE      policy.py │
+               │       │ Policy.order     prolog|python   │
                │       │ reads → wire → delete → none     │
                │       │ first is decided; the rest       │
                │       │ become follow_ups                │
                │       └────────────────┬─────────────────┘
+               │           invalid ────────► DENY
                │                        │ first request + its rank
                ▼                        ▼
           ┌──────────────────────────────────┐
@@ -489,6 +490,7 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 | route_one_request_uses_the_single_jev_rank | One request skips the split | unit |
 | route_failed_split_denies_without_guessing | A failed split is denied | unit |
 | route_failed_labeling_denies_without_guessing | A failed labeling is denied | unit |
+| route_invalid_order_denies_without_guessing | A reasoner order that repeats or drops a request is denied | unit |
 | route_none_label_is_ordered_last | A `none` label goes last | unit |
 | live_jev_abstains_on_unrelated_sentence | Real Jev returns `none` for "capital of Portugal" | integration |
 | `test_workflow.py` | | |
@@ -519,6 +521,7 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 | explainer_flags_a_gap_below_its_floor (0.46, 0.44) | MiniLM flags a gap just below 0.45 and not just above | unit |
 | `test_policy_engines.py` | | |
 | prolog_policy_agrees_with_python_policy | Prolog returns the same verdict, reasons in order, and suggestion as Python on 1,728 cases | integration (prolog) |
+| prolog_policy_orders_requests_like_python_policy | Prolog orders all 252 sequences of 2 or 3 labels as Python does, ties included | integration (prolog) |
 | `test_structured_output.py` | | |
 | classify_returns_a_catalog_action (native, instructor) | A local Ollama model returns one catalog action in a valid shape; accuracy printed | integration (ollama) |
 | split_returns_a_list_of_requests (native, instructor) | A local Ollama model returns a list of requests in a valid shape; accuracy printed | integration (ollama) |

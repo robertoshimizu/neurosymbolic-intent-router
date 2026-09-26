@@ -19,7 +19,8 @@ RULES_FILE = Path(__file__).with_name("policy.pl")
 
 
 class PrologPolicy(Policy):
-    """Asks policy:denials/3 for every reason an action is denied, and policy:suggestion/3 for what to offer."""
+    """Asks policy:denials/3 for every reason an action is denied, policy:suggestion/3 for what to offer,
+    and policy:ordered/2 for the handling order of several requests."""
 
     def __init__(self, rules_file: Path = RULES_FILE) -> None:
         janus.consult(str(rules_file))
@@ -52,3 +53,12 @@ class PrologPolicy(Policy):
         if not permitted["truth"]:
             raise RuntimeError(f"policy:permitted_message/2 has no entry for {action!r}")
         return PolicyResult(allowed=True, reasons=(permitted["M"],))
+
+    def order(self, actions: tuple[str, ...]) -> tuple[int, ...]:
+        answer = janus.query_once("policy:ordered(A, P)", {"A": list(actions)})
+        if not answer["truth"]:
+            raise RuntimeError("policy:ordered/2 failed")
+        positions = answer["P"]
+        if not isinstance(positions, list) or not all(isinstance(p, int) for p in positions):
+            raise ValueError(f"policy:ordered/2 returned {positions!r}, not a list of positions")
+        return tuple(positions)

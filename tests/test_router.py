@@ -345,6 +345,23 @@ def test_route_failed_labeling_denies_without_guessing() -> None:
     assert decision.reason == "several requests could not be labeled"
 
 
+class _RepeatingOrderPolicy(PythonPolicy):
+    """A reasoner whose order repeats one request and drops the other."""
+
+    def order(self, actions: tuple[str, ...]) -> tuple[int, ...]:
+        return (0,) * len(actions)
+
+
+def test_route_invalid_order_denies_without_guessing() -> None:
+    rank = replace(_jev_rank("none", 0.9), request_count="several")
+    decision = route(
+        CLOSE_AND_WIRE, _session("funded"), _ledger(Decimal("10000")), policy=_RepeatingOrderPolicy(),
+        classifier=_classifier(rank), labeler=_FakeLabeler(_labels), splitter=_FakeSplitter(lambda _u: (CLOSE, WIRE_500)),
+    )
+    assert decision.outcome == "deny"
+    assert decision.reason == "several requests could not be ordered"
+
+
 def test_route_none_label_is_ordered_last() -> None:
     def _unsure_balance(requests: tuple[str, ...]) -> list[IntentRank]:
         return [_jev_rank("none" if text == BALANCE else LABELS[text], 0.95) for text in requests]

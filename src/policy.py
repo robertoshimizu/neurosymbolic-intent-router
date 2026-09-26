@@ -124,8 +124,14 @@ RULES: dict[str, ActionRule] = {
 
 ACTION_CATALOG: dict[str, str] = {action: rule.description for action, rule in RULES.items()}
 
-# Ties keep the written order. `none` is absent, so callers sort it last.
+# Ties keep the written order. `none` and unknown actions go last.
 ACTION_PRECEDENCE: dict[str, int] = {action: rule.precedence for action, rule in RULES.items()}
+
+
+def ordered(actions: tuple[str, ...]) -> tuple[int, ...]:
+    """Positions of `actions` by precedence: reads, then money movement, then deletion, then the rest."""
+    last = len(ACTION_PRECEDENCE)
+    return tuple(sorted(range(len(actions)), key=lambda i: ACTION_PRECEDENCE.get(actions[i], last)))
 
 
 def denials(
