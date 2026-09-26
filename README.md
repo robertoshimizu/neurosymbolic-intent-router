@@ -127,6 +127,15 @@ You also asked (ask again to proceed):
 Workflow: received -> routing -> executing -> completed (wire of $500 settled). Balance now $9500
 ```
 
+The **Allowed?** column is the symbolic side at work. The model scores are identical in all three runs; the permissions are not:
+
+| Action | Not authenticated | No money | Funded |
+|---|---|---|---|
+| wire_transfer_funds | NO | NO | YES |
+| view_account_balance | NO | YES | YES |
+| view_public_faq | YES | YES | YES |
+| delete_account | NO | NO | NO |
+
 The rules behind these outcomes, from `src/policy.pl`. For each request `R`, the Python adapter asserts facts such as `authenticated(R)`, `amount(R, 500)` and `balance(R, 10000)`; a value the request lacks is simply not asserted:
 
 ```prolog
