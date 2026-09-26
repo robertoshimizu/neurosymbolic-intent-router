@@ -127,14 +127,42 @@ You also asked (ask again to proceed):
 Workflow: received -> routing -> executing -> completed (wire of $500 settled). Balance now $9500
 ```
 
-The **Allowed?** column is the symbolic side at work. The model scores are identical in all three runs; the permissions are not:
+The rules behind these outcomes, from `src/policy.pl`:
 
-| Action | Not authenticated | No money | Funded |
-|---|---|---|---|
-| wire_transfer_funds | NO | NO | YES |
-| view_account_balance | NO | YES | YES |
-| view_public_faq | YES | YES | YES |
-| delete_account | NO | NO | NO |
+```prolog
+%   Handling order for several requests: reads, then money movement, then deletion.
+precedence(view_public_faq,      0).
+precedence(view_account_balance, 0).
+precedence(wire_transfer_funds,  1).
+precedence(delete_account,       2).
+
+denied(wire_transfer_funds, F, "caller is not authenticated") :-
+    \+ authenticated(F).
+denied(wire_transfer_funds, F, "account is not active") :-
+    \+ get_dict(status, F, active).
+denied(wire_transfer_funds, F, "transfer amount is missing or invalid") :-
+    \+ positive_amount(F).
+denied(wire_transfer_funds, F, "payee is not on the allowlist") :-
+    get_dict(payee, F, @none).
+denied(wire_transfer_funds, F, "insufficient funds for the requested amount") :-
+    insufficient_funds(F).
+
+denied(view_account_balance, F, "caller is not authenticated") :-
+    \+ authenticated(F).
+
+denied(delete_account, F, "delete requires an authenticated admin") :-
+    \+ ( authenticated(F), get_dict(role, F, admin) ).
+
+%!  suggestion(+Action, +Facts, -Suggested) is semidet.
+%   A permitted action to offer after Action is denied. First match only.
+suggestion(Action, Facts, Suggested) :-
+    suggests(Action, Facts, Suggested),
+    denials(Suggested, Facts, []),
+    !.
+
+suggests(wire_transfer_funds, F, view_account_balance) :-
+    insufficient_funds(F).
+```
 
 What it shows: the models read the same sentence the same way for all three customers; only the rules and the ledger make the outcomes differ. The model's 0.99 confidence does not move money for the user who is not authenticated. `--policy python` prints the same decisions.
 
