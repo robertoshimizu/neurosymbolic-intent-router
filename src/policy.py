@@ -1,4 +1,4 @@
-"""Banking domain and policy rules. No model code: the action arrives already chosen."""
+"""Banking domain and the Python policy rules. No model code: the action arrives already chosen."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Literal
-
-from transfer import Ledger
 
 NONE_ACTION = "none"
 
@@ -32,14 +30,6 @@ class Session:
 class ParsedRequest:
     amount: Decimal | None
     payee: str | None
-
-
-@dataclass(frozen=True)
-class Verdict:
-    outcome: Outcome
-    reason: str
-    parsed: ParsedRequest
-    suggestion: str | None = None
 
 
 def parse_request(utterance: str, payee_allowlist: tuple[str, ...]) -> ParsedRequest:
@@ -138,34 +128,28 @@ ACTION_CATALOG: dict[str, str] = {action: rule.description for action, rule in R
 ACTION_PRECEDENCE: dict[str, int] = {action: rule.precedence for action, rule in RULES.items()}
 
 
+def denials(
+    action: str,
+    session: Session,
+    balance: Decimal,
+    parsed: ParsedRequest,
+) -> tuple[str, ...]:
+    """Every reason the action is denied, in check order. Empty means permitted."""
+    rule = RULES.get(action)
+    if rule is None:
+        return ("unknown action denied",)
+    reasons = (check(session, balance, parsed) for check in rule.checks)
+    return tuple(reason for reason in reasons if reason is not None)
+
+
 def evaluate_action(
     action: str,
     session: Session,
     balance: Decimal,
     parsed: ParsedRequest,
 ) -> tuple[bool, str]:
-    """Return (allowed, reason) for one catalog action against session facts."""
-    rule = RULES.get(action)
-    if rule is None:
-        return False, "unknown action denied"
-    for check in rule.checks:
-        reason = check(session, balance, parsed)
-        if reason is not None:
-            return False, reason
-    return True, rule.permitted
-
-
-def decide(text: str, action: str, session: Session, ledger: Ledger) -> Verdict:
-    """Judge one already-chosen action: deny, or execute."""
-    parsed = parse_request(text, session.payee_allowlist)
-    if action == NONE_ACTION:
-        return Verdict("deny", "no matching action", parsed)
-    allowed, reason = evaluate_action(action, session, ledger.get_balance(session.account_id), parsed)
-    if not allowed:
-        suggestion = (
-            "view_account_balance"
-            if action == "wire_transfer_funds" and "insufficient funds" in reason
-            else None
-        )
-        return Verdict("deny", reason, parsed, suggestion)
-    return Verdict("execute", reason, parsed)
+    """Return (allowed, first reason) for one catalog action against session facts."""
+    reasons = denials(action, session, balance, parsed)
+    if reasons:
+        return False, reasons[0]
+    return True, RULES[action].permitted

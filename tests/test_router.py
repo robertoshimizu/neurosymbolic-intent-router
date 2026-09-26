@@ -15,6 +15,7 @@ from contracts import Classifier, DescriptionMatch, Explainer, IntentRank, Label
 from jev import JevClassifier
 from minilm import ActionEmbedder, MiniLMExplainer
 from policy import ACTION_CATALOG
+from python_policy import PythonPolicy
 from router import Decision, decide, route
 from policy import Session
 from transfer import Ledger, WireTransfer, authorize_or_refuse
@@ -31,6 +32,7 @@ def _orthonormal_catalog() -> dict[str, np.ndarray]:
 
 
 WIRE_UTTERANCE = "I want to send $5,000 to my external bank account."
+POLICY = PythonPolicy()
 
 
 def _session(
@@ -63,6 +65,7 @@ def _decide_wire(session: Session, ledger: Ledger) -> Decision:
         WIRE_UTTERANCE,
         session,
         ledger,
+        policy=POLICY,
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.9)),
     )
 
@@ -173,6 +176,7 @@ def test_jev_none_stops_before_policy() -> None:
         "What is the capital of Portugal?",
         _session("funded"),
         _ledger(Decimal("10000")),
+        policy=POLICY,
         classifier=_classifier(_jev_rank("none", 0.91)),
     )
     assert decision.outcome == "deny"
@@ -187,6 +191,7 @@ def test_jev_wire_is_judged_by_policy() -> None:
         WIRE_UTTERANCE,
         _session("funded"),
         _ledger(Decimal("10000")),
+        policy=POLICY,
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
     )
     assert decision.action == "wire_transfer_funds"
@@ -201,6 +206,7 @@ def test_minilm_disagreement_does_not_override_jev() -> None:
         WIRE_UTTERANCE,
         _session("funded"),
         _ledger(Decimal("10000")),
+        policy=POLICY,
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
         explainer=MiniLMExplainer(_FixedEmbedder(faq_query, _orthonormal_catalog())),
     )
@@ -222,6 +228,7 @@ def test_explainer_failure_keeps_the_decision() -> None:
         WIRE_UTTERANCE,
         _session("funded"),
         _ledger(Decimal("10000")),
+        policy=POLICY,
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
         explainer=_BrokenExplainer(),
     )
@@ -239,6 +246,7 @@ def test_classifier_failure_denies_without_guessing() -> None:
         WIRE_UTTERANCE,
         _session("funded"),
         _ledger(Decimal("10000")),
+        policy=POLICY,
         classifier=_FakeClassifier(_boom),
     )
     assert decision.action == "none"
@@ -254,6 +262,7 @@ def test_live_jev_abstains_on_unrelated_sentence() -> None:
         "What is the capital of Portugal?",
         _session("funded"),
         _ledger(Decimal("10000")),
+        policy=POLICY,
         classifier=JevClassifier(),
     )
     assert decision.source == "jev"
@@ -281,7 +290,7 @@ def _route(
 ) -> Decision:
     rank = replace(_jev_rank(action, 0.9), request_count=count)
     return route(
-        utterance, session, ledger,
+        utterance, session, ledger, policy=POLICY,
         classifier=_classifier(rank), labeler=_FakeLabeler(labeler), splitter=_FakeSplitter(split),
     )
 

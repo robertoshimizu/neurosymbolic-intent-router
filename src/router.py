@@ -1,12 +1,11 @@
-"""Neuro-symbolic action router: a Classifier picks the action, policy judges it."""
+"""Neuro-symbolic action router: a Classifier reads the intent, an injected Policy judges it."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
-import policy
-from contracts import Classifier, DescriptionMatch, Explainer, IntentRank, Labeler, Splitter
+from contracts import Classifier, DescriptionMatch, Explainer, IntentRank, Labeler, Policy, PolicyResult, Splitter
 from policy import (
     ACTION_CATALOG,
     ACTION_PRECEDENCE,
@@ -14,7 +13,6 @@ from policy import (
     Outcome,
     ParsedRequest,
     Session,
-    evaluate_action,
     parse_request,
 )
 from transfer import Ledger
@@ -35,7 +33,21 @@ class Decision:
     follow_ups: tuple[str, ...] = ()
 
 
+POLICY_UNAVAILABLE = PolicyResult(allowed=False, reasons=("policy unavailable",))
+
+
+def _evaluate(
+    policy: Policy, action: str, session: Session, balance: Decimal, parsed: ParsedRequest
+) -> PolicyResult:
+    """A reasoner that errors or breaks its contract denies. It never allows by accident."""
+    try:
+        return policy.evaluate(action, session, balance, parsed)
+    except Exception:
+        return POLICY_UNAVAILABLE
+
+
 def evaluate_permissions(
+    policy: Policy,
     session: Session,
     balance: Decimal,
     parsed: ParsedRequest,
@@ -44,9 +56,9 @@ def evaluate_permissions(
     permissions: dict[str, bool] = {}
     reasons: dict[str, str] = {}
     for action in actions:
-        allowed, reason = evaluate_action(action, session, balance, parsed)
-        permissions[action] = allowed
-        reasons[action] = reason
+        result = _evaluate(policy, action, session, balance, parsed)
+        permissions[action] = result.allowed
+        reasons[action] = "; ".join(result.reasons)
     return permissions, reasons
 
 
@@ -77,6 +89,7 @@ def decide(
     session: Session,
     ledger: Ledger,
     *,
+    policy: Policy,
     classifier: Classifier | None = None,
     explainer: Explainer | None = None,
     rank: IntentRank | None = None,
@@ -121,11 +134,11 @@ def decide(
     catalog_actions = [action for action in scores if action in ACTION_CATALOG]
     if top_action not in ACTION_CATALOG:
         catalog_actions = list(ACTION_CATALOG)
-    verdict = policy.decide(utterance, top_action, session, ledger)
-    parsed = verdict.parsed
-    policy_reason = verdict.reason
+    parsed = parse_request(utterance, session.payee_allowlist)
+    verdict = _evaluate(policy, top_action, session, balance, parsed)
+    policy_reason = "; ".join(verdict.reasons)
     permissions, _reasons = evaluate_permissions(
-        session, balance, parsed, catalog_actions or [top_action]
+        policy, session, balance, parsed, catalog_actions or [top_action]
     )
 
     rule_trace = [
@@ -173,8 +186,14 @@ def decide(
             description_match=description_match,
         )
 
-    if verdict.outcome == "deny":
-        return _decision("deny", policy_reason, suggestion=verdict.suggestion)
+    if not verdict.allowed:
+        suggestion = (
+            "view_account_balance"
+            if top_action == "wire_transfer_funds"
+            and any("insufficient funds" in reason for reason in verdict.reasons)
+            else None
+        )
+        return _decision("deny", policy_reason, suggestion=suggestion)
 
     return _decision("execute", policy_reason)
 
@@ -196,6 +215,7 @@ def route(
     session: Session,
     ledger: Ledger,
     *,
+    policy: Policy,
     classifier: Classifier | None = None,
     labeler: Labeler | None = None,
     splitter: Splitter | None = None,
@@ -209,7 +229,7 @@ def route(
     if rank is None:
         return _unavailable(utterance, session)
     if rank.request_count != "several":
-        return decide(utterance, session, ledger, explainer=explainer, rank=rank)
+        return decide(utterance, session, ledger, policy=policy, explainer=explainer, rank=rank)
 
     try:
         requests = splitter.split(utterance) if splitter is not None else ()
@@ -230,7 +250,7 @@ def route(
         labels[i], len(ACTION_PRECEDENCE)))
     head = ordered[0]
     first = decide(requests[head], session, ledger,
-                   explainer=explainer, rank=ranks[head])
+                   policy=policy, explainer=explainer, rank=ranks[head])
     trace = [
         "request_count=several",
         *(f"split[{i}]={requests[i]!r} label={labels[i]} confidence={ranks[i].confidence:.4f}" for i in range(len(requests))),

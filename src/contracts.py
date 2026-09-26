@@ -1,17 +1,19 @@
-"""The router's contracts: the roles a model adapter must implement, and the types they exchange.
+"""The router's contracts: the roles a model or reasoner adapter must implement, and the types they exchange.
 
 Adapters subclass these Protocols explicitly. A missing method fails when the
 adapter is created; a wrong signature fails `uv run pyright`. A model value
-outside the contract fails when an IntentRank is built.
+outside the contract fails when an IntentRank is built; a reasoner answer
+outside the contract fails when a PolicyResult is built.
 """
 
 from __future__ import annotations
 
 from abc import abstractmethod
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Literal, Protocol, get_args
 
-from policy import ACTION_CATALOG, NONE_ACTION
+from policy import ACTION_CATALOG, NONE_ACTION, ParsedRequest, Session
 
 RequestCount = Literal["none", "one", "several"]
 
@@ -83,3 +85,29 @@ class Explainer(Protocol):
 
     @abstractmethod
     def explain(self, text: str, action: str) -> DescriptionMatch | None: ...
+
+
+@dataclass(frozen=True)
+class PolicyResult:
+    """A reasoner's verdict on one action. Denied: every reason, in the reasoner's order. Allowed: the permit message."""
+
+    allowed: bool
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """Reasoners can return anything; reject values outside the contract before the router sees them."""
+        if not isinstance(self.allowed, bool):
+            raise ValueError(f"allowed {self.allowed!r} is not a bool")
+        if not isinstance(self.reasons, tuple) or not self.reasons:
+            raise ValueError("reasons must be a non-empty tuple")
+        if not all(isinstance(reason, str) and reason for reason in self.reasons):
+            raise ValueError("reasons must be non-empty strings")
+
+
+class Policy(Protocol):
+    """Judges one action against session facts. The router does not know which reasoner answers."""
+
+    @abstractmethod
+    def evaluate(
+        self, action: str, session: Session, balance: Decimal, parsed: ParsedRequest
+    ) -> PolicyResult: ...

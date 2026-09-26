@@ -1,16 +1,31 @@
-"""Demo entry point: wires Jev, MedGemma and MiniLM into the router and runs three sessions."""
+"""Demo entry point: wires Jev, MedGemma, MiniLM and a policy reasoner into the router and runs three sessions.
+
+    uv run --env-file .env python src/demo.py [--policy prolog|python]
+"""
 
 from __future__ import annotations
 
+import argparse
 from decimal import Decimal
 
 from intent_understanding import MedGemmaSplitter
 from jev import JevClassifier
 from minilm import MiniLMExplainer
+from contracts import Policy
 from policy import Session
+from python_policy import PythonPolicy
 from router import Decision
 from transfer import Ledger
 from workflow import RequestWorkflow
+
+
+def build_policy(name: str) -> Policy:
+    """The only place that knows which reasoner judges actions."""
+    if name == "python":
+        return PythonPolicy()
+    from prolog_policy import PrologPolicy  # needs SWI-Prolog; imported only when chosen
+
+    return PrologPolicy()
 
 
 def print_decision(utterance: str, session: Session, decision: Decision) -> None:
@@ -111,6 +126,9 @@ def build_demo_world() -> tuple[dict[str, Session], Ledger]:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--policy", choices=("prolog", "python"), default="prolog")
+    policy = build_policy(parser.parse_args().policy)
     utterance = "Close this account and send $500 to my external bank account."
     sessions, ledger = build_demo_world()
     classifier = JevClassifier()
@@ -122,7 +140,7 @@ if __name__ == "__main__":
         balance = ledger.get_balance(session.account_id)
         workflow = RequestWorkflow(
             utterance, session, ledger, request_id=f"request-{key}",
-            classifier=classifier, labeler=classifier, splitter=splitter, explainer=explainer,
+            policy=policy, classifier=classifier, labeler=classifier, splitter=splitter, explainer=explainer,
         )
         workflow.send("start")
         print(f"\n--- Session '{key}' (balance=${balance}) ---")

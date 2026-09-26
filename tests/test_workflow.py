@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from contracts import Classifier, IntentRank
 from policy import Session
+from python_policy import PythonPolicy
 from transfer import Ledger
 from workflow import RequestWorkflow
 
@@ -54,7 +55,7 @@ def _run(
     text: str, action: str | None, session: Session, ledger: Ledger,
     request_id: str = "r1", listener: object | None = None,
 ) -> RequestWorkflow:
-    workflow = RequestWorkflow(text, session, ledger, request_id, classifier=_FixedClassifier(action))
+    workflow = RequestWorkflow(text, session, ledger, request_id, policy=PythonPolicy(), classifier=_FixedClassifier(action))
     if listener is not None:
         workflow.add_listener(listener)
     workflow.send("start")

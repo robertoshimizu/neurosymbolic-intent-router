@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from statemachine import State, StateChart
 
-from contracts import Classifier, Explainer, Labeler, Splitter
+from contracts import Classifier, Explainer, Labeler, Policy, Splitter
 from policy import Session
 from router import Decision, route
 from transfer import Ledger, WireTransfer, authorize_or_refuse
@@ -41,6 +41,7 @@ class RequestWorkflow(StateChart):
         ledger: Ledger,
         request_id: str,
         *,
+        policy: Policy,
         classifier: Classifier | None = None,
         labeler: Labeler | None = None,
         splitter: Splitter | None = None,
@@ -50,6 +51,7 @@ class RequestWorkflow(StateChart):
         self.session = session
         self.ledger = ledger
         self.request_id = request_id
+        self.policy = policy
         self.roles = {"classifier": classifier, "labeler": labeler, "splitter": splitter, "explainer": explainer}
         self.decision: Decision | None = None
         self.note = ""
@@ -63,7 +65,7 @@ class RequestWorkflow(StateChart):
         """Neural interpret + symbolic decide, as one step. The rules' decision is the only way out."""
         self.decision = route(
             self.utterance, self.session, self.ledger,
-            classifier=self.roles["classifier"], labeler=self.roles["labeler"],
+            policy=self.policy, classifier=self.roles["classifier"], labeler=self.roles["labeler"],
             splitter=self.roles["splitter"], explainer=self.roles["explainer"],
         )
         self.send("routed")
