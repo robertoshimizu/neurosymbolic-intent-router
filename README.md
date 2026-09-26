@@ -2,6 +2,8 @@
 
 **Models interpret, rules decide.** Language models are used only to understand the text; they never choose an action.
 
+`#MedGemma` `#Qwen3.8` `#MiniLM` `#SentenceTransformers` `#Jev` `#python-statemachine` `#StateMachine` `#FiniteStateMachine` `#NeuroSymbolic` `#NeuroSymbolicAI` `#IntentClassification` `#LLM` `#NLP` `#Ollama` `#Instructor` `#Pydantic` `#Pyright` `#Python` `#FailClosed` `#StructuredOutput`
+
 ## Goal
 
 Turn a user's free-text request into an action in a workflow, with high precision: the workflow should not act on a misread request. The project explores how far a neuro-symbolic design gets there. Language models handle what language makes hard: what is being asked, and how many things. Symbolic components keep the authority: what is allowed, in what order, and how a transaction moves from start to finish. The long-term aim is to measure this: raise precision while giving up no more recall than the domain can afford.
