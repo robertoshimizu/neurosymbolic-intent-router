@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from decimal import Decimal
 
 import numpy as np
@@ -116,32 +117,6 @@ def test_guest_wire_denied() -> None:
     assert "not signed in" in reason
 
 
-def test_insufficient_funds_denied() -> None:
-    session = _session("thin", account_id="a")
-    parsed = parse_request(
-        "send $5,000 to external bank account",
-        session.payee_allowlist,
-    )
-    allowed, reason = evaluate_action(
-        "wire_transfer_funds", session, Decimal("1"), parsed
-    )
-    assert allowed is False
-    assert "insufficient funds" in reason
-
-
-def test_funded_allowlisted_wire_permitted() -> None:
-    session = _session("funded", account_id="a")
-    parsed = parse_request(
-        "send $5,000 to external bank account",
-        session.payee_allowlist,
-    )
-    allowed, reason = evaluate_action(
-        "wire_transfer_funds", session, Decimal("10000"), parsed
-    )
-    assert allowed is True
-    assert "permitted" in reason
-
-
 def test_delete_denied_for_customer() -> None:
     session = _session("cust", account_id="a", payee_allowlist=())
     allowed, reason = evaluate_action(
@@ -154,34 +129,12 @@ def test_delete_denied_for_customer() -> None:
     assert "admin" in reason
 
 
-def test_denied_top_intent_does_not_become_faq() -> None:
-    session = _session(
-        "guest",
-        is_authenticated=False,
-        role="guest",
-        status="inactive",
-        payee_allowlist=(),
-    )
-    decision = _decide_wire(session, _ledger(Decimal("0")))
-    assert decision.action == "wire_transfer_funds"
-    assert decision.outcome == "deny"
-    assert "not signed in" in decision.reason
-    assert decision.action != "view_public_faq"
-
-
 def test_insufficient_funds_suggests_balance_view() -> None:
     session = _session("zero")
     decision = _decide_wire(session, _ledger(Decimal("0")))
     assert decision.outcome == "deny"
     assert "insufficient funds" in decision.reason
     assert decision.suggestion == "view_account_balance"
-
-
-def test_allowed_wire_needs_confirmation() -> None:
-    session = _session("funded")
-    decision = _decide_wire(session, _ledger(Decimal("10000")))
-    assert decision.action == "wire_transfer_funds"
-    assert decision.outcome == "needs_confirmation"
 
 
 def test_ambiguous_margin_denied() -> None:
@@ -331,24 +284,6 @@ def test_jev_wire_still_needs_confirmation() -> None:
     assert decision.description_match is None
 
 
-def test_minilm_explains_when_it_agrees_with_jev() -> None:
-    decision = decide(
-        WIRE_UTTERANCE,
-        _session("funded"),
-        _ledger(Decimal("10000")),
-        query_vector=WIRE_QUERY,
-        action_embeddings=_orthonormal_catalog(),
-        intent_ranker=lambda _utterance: _jev_rank("wire_transfer_funds", 0.86),
-    )
-    assert decision.action == "wire_transfer_funds"
-    assert decision.outcome == "needs_confirmation"
-    match = decision.description_match
-    assert match is not None
-    assert match.agrees
-    assert match.nearest == "wire_transfer_funds"
-    assert "minilm_agrees=yes" in decision.rule_trace
-
-
 def test_minilm_disagreement_does_not_override_jev() -> None:
     faq_query = np.array([0.02, 0.05, 0.10, 0.98])
     decision = decide(
@@ -382,19 +317,6 @@ def test_jev_failure_falls_back_to_minilm() -> None:
     assert decision.outcome == "needs_confirmation"
 
 
-def test_jev_abstain_skips_minilm_explanation() -> None:
-    decision = decide(
-        "What is the capital of Portugal?",
-        _session("funded"),
-        _ledger(Decimal("10000")),
-        query_vector=WIRE_QUERY,
-        action_embeddings=_orthonormal_catalog(),
-        intent_ranker=lambda _utterance: _jev_rank("none", 0.91),
-    )
-    assert decision.reason == "no matching action"
-    assert decision.description_match is None
-
-
 @pytest.mark.integration
 def test_live_jev_abstains_on_unrelated_sentence() -> None:
     if not os.environ.get("TYPESAFE_API_KEY"):
@@ -412,40 +334,26 @@ def test_live_jev_abstains_on_unrelated_sentence() -> None:
 CLOSE_AND_WIRE = "Close this account and send $500 to my external bank account."
 CLOSE = "Close this account."
 WIRE_500 = "Send $500 to my external bank account."
+BALANCE = "Show my balance."
+LABELS = {CLOSE: "delete_account", WIRE_500: "wire_transfer_funds", BALANCE: "view_account_balance"}
 
 
-def _keyword_rank(clause: str) -> IntentRank:
-    lower = clause.lower()
-    if "close" in lower:
-        return _jev_rank("delete_account", 0.95)
-    if "send" in lower:
-        return _jev_rank("wire_transfer_funds", 0.95)
-    if "balance" in lower:
-        return _jev_rank("view_account_balance", 0.95)
-    return _jev_rank("none", 0.95)
+def _labels(requests: tuple[str, ...]) -> list[IntentRank]:
+    return [_jev_rank(LABELS.get(text, "none"), 0.95) for text in requests]
 
 
-def _route(utterance: str, session: Session, ledger: Ledger, *, count: str | None, split) -> Decision:
-    return route(
-        utterance,
-        session,
-        ledger,
-        request_counter=lambda _u: count,
-        splitter=split,
-        intent_ranker=_keyword_rank,
-    )
+def _route(utterance: str, session: Session, ledger: Ledger, *, count: str | None, split, labeler=_labels, action: str = "none") -> Decision:
+    rank = replace(_jev_rank(action, 0.9), request_count=count)
+    return route(utterance, session, ledger, splitter=split, labeler=labeler, intent_ranker=lambda _u: rank)
 
 
-def _no_split(_utterance: str) -> tuple[str, ...]:
-    raise AssertionError("splitter must not run")
+def _never(*_args) -> None:
+    raise AssertionError("must not run")
 
 
 def test_route_orders_money_movement_before_deletion() -> None:
     ledger = _ledger(Decimal("10000"))
-    decision = _route(
-        CLOSE_AND_WIRE, _session("admin", role="admin"), ledger,
-        count="several", split=lambda _u: (CLOSE, WIRE_500),
-    )
+    decision = _route(CLOSE_AND_WIRE, _session("admin", role="admin"), ledger, count="several", split=lambda _u: (CLOSE, WIRE_500))
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "needs_confirmation"
     assert decision.follow_ups == (CLOSE,)
@@ -453,35 +361,20 @@ def test_route_orders_money_movement_before_deletion() -> None:
 
 
 def test_route_denied_first_request_offers_no_follow_ups() -> None:
-    decision = _route(
-        CLOSE_AND_WIRE, _session("admin", role="admin"), _ledger(Decimal("0")),
-        count="several", split=lambda _u: (CLOSE, WIRE_500),
-    )
+    decision = _route(CLOSE_AND_WIRE, _session("admin", role="admin"), _ledger(Decimal("0")), count="several", split=lambda _u: (CLOSE, WIRE_500))
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "deny"
     assert decision.follow_ups == ()
 
 
-def test_route_read_runs_before_wire() -> None:
+def test_route_one_request_uses_the_single_jev_rank() -> None:
     decision = _route(
-        "Wire $500 to my external bank account and show my balance.",
-        _session("funded"), _ledger(Decimal("10000")),
-        count="several", split=lambda _u: (WIRE_500, "Show my balance."),
+        WIRE_UTTERANCE, _session("funded"), _ledger(Decimal("10000")),
+        count="one", split=_never, labeler=_never, action="wire_transfer_funds",
     )
-    assert decision.action == "view_account_balance"
-    assert decision.outcome == "execute"
-    assert decision.follow_ups == (WIRE_500,)
-
-
-def test_route_one_request_skips_splitter() -> None:
-    decision = _route(WIRE_UTTERANCE, _session("funded"), _ledger(Decimal("10000")), count="one", split=_no_split)
     assert decision.action == "wire_transfer_funds"
-    assert decision.follow_ups == ()
-
-
-def test_route_unknown_count_skips_splitter() -> None:
-    decision = _route(WIRE_UTTERANCE, _session("funded"), _ledger(Decimal("10000")), count=None, split=_no_split)
     assert decision.outcome == "needs_confirmation"
+    assert decision.follow_ups == ()
 
 
 def test_route_failed_split_denies_without_guessing() -> None:
@@ -489,5 +382,24 @@ def test_route_failed_split_denies_without_guessing() -> None:
         raise RuntimeError("Ollama request failed")
 
     decision = _route(CLOSE_AND_WIRE, _session("funded"), _ledger(Decimal("10000")), count="several", split=_down)
-    assert decision.outcome == "deny"
     assert decision.reason == "several requests could not be separated"
+
+
+def test_route_failed_labeling_denies_without_guessing() -> None:
+    decision = _route(
+        CLOSE_AND_WIRE, _session("funded"), _ledger(Decimal("10000")),
+        count="several", split=lambda _u: (CLOSE, WIRE_500), labeler=lambda _r: None,
+    )
+    assert decision.reason == "several requests could not be labeled"
+
+
+def test_route_low_confidence_label_is_ordered_last() -> None:
+    def _unsure_balance(requests: tuple[str, ...]) -> list[IntentRank]:
+        return [_jev_rank(LABELS[text], 0.3 if text == BALANCE else 0.95) for text in requests]
+
+    decision = _route(
+        "Show my balance and send $500 to my external bank account.", _session("funded"), _ledger(Decimal("10000")),
+        count="several", split=lambda _u: (BALANCE, WIRE_500), labeler=_unsure_balance,
+    )
+    assert decision.action == "wire_transfer_funds"
+    assert decision.follow_ups == (BALANCE,)

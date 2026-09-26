@@ -368,6 +368,7 @@ class IntentRank:
     confidence: float
     source: Literal["jev", "minilm"]
     runner_up: float = 0.0
+    request_count: str | None = None
 
 
 IntentRanker = Callable[[str], IntentRank | None]
@@ -393,15 +394,30 @@ def rank_with_jev(utterance: str) -> IntentRank | None:
                         ),
                         criteria=criteria,
                     ),
+                    "request_count": Choice(
+                        instructions=(
+                            "How many distinct things does the user ask the system to do? "
+                            "A mention of a future action that is only context does not count as a request."
+                        ),
+                        criteria={
+                            "none": "The text asks the system to do nothing",
+                            "one": "The text asks the system to do exactly one thing",
+                            "several": "The text asks the system to do two or more different things",
+                        },
+                    ),
                 },
             )
         answer = response.answers["action"]
-        probabilities = {str(label): float(prob) for label, prob in answer.probabilities.items()}
+        count = response.answers["request_count"]
+        probabilities = {str(label): float(prob)
+                         for label, prob in answer.probabilities.items()}
         return IntentRank(
             action=str(answer.choice),
             scores=probabilities,
             confidence=float(answer.confidence),
             source="jev",
+            request_count=str(count.choice) if float(
+                count.confidence) >= JEV_MIN_CONFIDENCE else None,
         )
     except Exception:
         print("Jev unavailable; using MiniLM fallback.", flush=True)
@@ -498,13 +514,15 @@ def decide(
     min_score: float = MIN_SCORE,
     min_margin: float = MIN_MARGIN,
     jev_min_confidence: float = JEV_MIN_CONFIDENCE,
+    rank: IntentRank | None = None,
 ) -> Decision:
     """Rank the utterance, judge the top raw intent, and return a Decision.
 
-    Jev `none` or low confidence stops before policy. A denied catalog intent
-    stays denied and is never replaced by FAQ.
+    Jev `none` or low confidence stops before policy. A denied
+    catalog intent stays denied and is never replaced by FAQ. A precomputed
+    `rank` skips ranking.
     """
-    rank = _select_rank(
+    rank = rank or _select_rank(
         utterance,
         intent_ranker=intent_ranker,
         query_vector=query_vector,
@@ -526,10 +544,10 @@ def decide(
             scores=scores,
             permissions={},
             rule_trace=[
-                f"source=jev action={rank.action} confidence={rank.confidence:.4f}",
+                f"source={rank.source} action={rank.action} confidence={rank.confidence:.4f}",
                 "abstain=before_policy",
             ],
-            source="jev",
+            source=rank.source,
         )
 
     top_action = rank.action
@@ -637,42 +655,60 @@ def decide(
     return _decision("execute", policy_reason)
 
 
-RequestCounter = Callable[[str], str | None]
 Splitter = Callable[[str], tuple[str, ...]]
+Labeler = Callable[[tuple[str, ...]], list[IntentRank] | None]
 
 
-def count_requests_with_jev(utterance: str) -> str | None:
-    """Jev's count of distinct requests: none, one, or several. None means unknown."""
+def label_with_jev(requests: tuple[str, ...]) -> list[IntentRank] | None:
+    """One Jev call, one catalog question per split request. None means unavailable."""
     _load_env()
     if not os.environ.get("TYPESAFE_API_KEY"):
         return None
     try:
         from typesafe_sdk import Choice, TypeSafeClient
 
+        criteria = {**ACTION_CATALOG, NONE_ACTION: NONE_CRITERION}
+        state = "\n".join(f"Request {i}: {text}" for i,
+                          text in enumerate(requests, start=1))
         with TypeSafeClient() as client:
             response = client.system_one(
-                state=utterance,
+                state=state,
                 questions={
-                    "request_count": Choice(
-                        instructions=(
-                            "How many distinct things does the user ask the system to do? "
-                            "A mention of a future action that is only context does not count as a request."
-                        ),
-                        criteria={
-                            "none": "The text asks the system to do nothing",
-                            "one": "The text asks the system to do exactly one thing",
-                            "several": "The text asks the system to do two or more different things",
-                        },
-                    ),
+                    f"request_{i}": Choice(
+                        instructions=f"Which banking action does Request {i} ask for? Choose none if it is not one of these actions.",
+                        criteria=criteria,
+                    )
+                    for i in range(1, len(requests) + 1)
                 },
             )
-        answer = response.answers["request_count"]
-        if float(answer.confidence) < JEV_MIN_CONFIDENCE:
-            return None
-        return str(answer.choice)
+        ranks = []
+        for i in range(1, len(requests) + 1):
+            answer = response.answers[f"request_{i}"]
+            ranks.append(
+                IntentRank(
+                    action=str(answer.choice),
+                    scores={str(label): float(prob)
+                            for label, prob in answer.probabilities.items()},
+                    confidence=float(answer.confidence),
+                    source="jev",
+                )
+            )
+        return ranks
     except Exception:
-        print("Jev request count unavailable; routing as one request.", flush=True)
+        print("Jev labeling unavailable.", flush=True)
         return None
+
+
+def _deny_split(utterance: str, session: Session, reason: str, trace: list[str]) -> Decision:
+    return Decision(
+        action=NONE_ACTION,
+        outcome="deny",
+        reason=reason,
+        parsed=parse_request(utterance, session.payee_allowlist),
+        scores={},
+        permissions={},
+        rule_trace=["request_count=several", *trace],
+    )
 
 
 def route(
@@ -680,67 +716,51 @@ def route(
     session: Session,
     ledger: Ledger,
     *,
-    request_counter: RequestCounter = count_requests_with_jev,
     splitter: Splitter = split_requests,
+    labeler: Labeler = label_with_jev,
     **decide_kwargs,
 ) -> Decision:
-    """Several requests: split, order logically, decide the first, ask about the rest.
-
-    One request, or an unknown count, is today's `decide()` unchanged. A denied
-    first request offers no follow-ups. This never mutates the ledger.
+    """One Jev call. Several requests: MedGemma splits, Jev labels them in one call,
+    the rule orders, policy decides the first, and the rest are listed.
+    Never mutates the ledger.
     """
-    if request_counter(utterance) != "several":
-        return decide(utterance, session, ledger, **decide_kwargs)
+    rank = _select_rank(
+        utterance,
+        intent_ranker=decide_kwargs.get("intent_ranker"),
+        query_vector=decide_kwargs.get("query_vector"),
+        action_embeddings=decide_kwargs.get("action_embeddings"),
+        embedder=decide_kwargs.get("embedder"),
+    )
+    if rank.request_count != "several":
+        return decide(utterance, session, ledger, rank=rank, **decide_kwargs)
 
     try:
-        clauses = splitter(utterance)
+        requests = splitter(utterance)
     except Exception:
-        clauses = ()
-    if len(clauses) < 2:
-        return Decision(
-            action=NONE_ACTION,
-            outcome="deny",
-            reason="several requests could not be separated",
-            parsed=parse_request(utterance, session.payee_allowlist),
-            scores={},
-            permissions={},
-            rule_trace=["request_count=several", f"split_count={len(clauses)}"],
-        )
+        requests = ()
+    if len(requests) < 2:
+        return _deny_split(utterance, session, "several requests could not be separated", [f"split_count={len(requests)}"])
 
-    # Label every clause only to order them. Policy runs on the first one alone.
-    jev_min_confidence = decide_kwargs.get("jev_min_confidence", JEV_MIN_CONFIDENCE)
-    ranks = [
-        _select_rank(
-            clause,
-            intent_ranker=decide_kwargs.get("intent_ranker"),
-            query_vector=None,
-            action_embeddings=None,
-            embedder=decide_kwargs.get("embedder"),
-        )
-        for clause in clauses
-    ]
-    labels = [
-        NONE_ACTION if rank.source == "jev" and rank.confidence < jev_min_confidence else rank.action
-        for rank in ranks
-    ]
-    ordered = sorted(
-        range(len(clauses)),
-        key=lambda i: ACTION_PRECEDENCE.get(labels[i], len(ACTION_PRECEDENCE)),
-    )
+    ranks = labeler(requests)
+    if ranks is None or len(ranks) != len(requests):
+        return _deny_split(utterance, session, "several requests could not be labeled", [f"split_count={len(requests)}"])
+
+    jev_min_confidence = decide_kwargs.get(
+        "jev_min_confidence", JEV_MIN_CONFIDENCE)
+    labels = [NONE_ACTION if r.confidence <
+              jev_min_confidence else r.action for r in ranks]
+    ordered = sorted(range(len(requests)), key=lambda i: ACTION_PRECEDENCE.get(
+        labels[i], len(ACTION_PRECEDENCE)))
     head = ordered[0]
-    # Reuse the head's rank so the decided action is the one that was ordered.
-    first = decide(
-        clauses[head],
-        session,
-        ledger,
-        **{**decide_kwargs, "intent_ranker": lambda _clause: ranks[head]},
-    )
+    first = decide(requests[head], session, ledger,
+                   rank=ranks[head], **decide_kwargs)
     trace = [
         "request_count=several",
-        *(f"split[{i}]={clauses[i]!r} label={labels[i]}" for i in range(len(clauses))),
+        *(f"split[{i}]={requests[i]!r} label={labels[i]} confidence={ranks[i].confidence:.4f}" for i in range(len(requests))),
         f"logical_order={[labels[i] for i in ordered]}",
     ]
-    follow_ups = () if first.outcome == "deny" else tuple(clauses[i] for i in ordered[1:])
+    follow_ups = () if first.outcome == "deny" else tuple(
+        requests[i] for i in ordered[1:])
     return replace(first, rule_trace=trace + first.rule_trace, follow_ups=follow_ups)
 
 
@@ -771,7 +791,8 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
         if not decision.permissions:
             allowed_str = "—"
         else:
-            allowed_str = "YES" if decision.permissions.get(act, False) else "NO"
+            allowed_str = "YES" if decision.permissions.get(
+                act, False) else "NO"
         if show_similarity:
             cosine = decision.description_match.similarities.get(act)
             cosine_str = f"{cosine:.4f}" if cosine is not None else "—"
@@ -842,7 +863,7 @@ def build_demo_world() -> tuple[dict[str, Session], Ledger]:
 
 
 if __name__ == "__main__":
-    utterance = "I want to get someone to give me a blow job."
+    utterance = "Close this account and send $500 to my external bank account."
     sessions, ledger = build_demo_world()
     embedder = ActionEmbedder()
 
