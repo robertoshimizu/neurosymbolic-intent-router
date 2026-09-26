@@ -49,16 +49,94 @@ Any doubt means deny: a model that is unsure, down or off-contract, an amount th
 
 ## Demo
 
-"Close this account and send $500 to my external bank account." for three customers (`uv run --env-file .env python src/demo.py`, one run on 2026-09-26). The models read it the same way every time: two requests, a wire (Jev 0.99) and a close. The Prolog rules put the wire first and judge it:
+One sentence, three bank customers. Output of `uv run --env-file .env python src/demo.py` on 2026-09-26, with the Prolog reasoner: one run, trimmed, not edited. It needs Jev (`TYPESAFE_API_KEY`), a local Ollama with `medgemma:27b`, and SWI-Prolog; see Run.
 
-| | Not authenticated, $0 | Customer, $0 | Customer, $10,000 |
+The sentence makes two requests. Jev reads it as `several`, MedGemma splits it into "Close this account." and "Send $500 to my external bank account.", Jev labels each one, and the precedence rule puts the wire first. The split itself is not printed; the follow-up line comes from it. A denial lists every reason the rules found, not only the first.
+
+**User not authenticated ($0): refused for four reasons; no suggestion, because the rules would deny the balance view too.**
+
+```
+Policy: prolog
+
+User Query: 'Close this account and send $500 to my external bank account.'
+Context: Auth=False, Role='unauthenticated', Status='inactive', Account='acct-unauthenticated'
+
+Classifier: jev
+
+Action Decision Matrix:
+Candidate Action         | Classifier Score | Explainer Score | Allowed?
+--------------------------------------------------------------------------
+wire_transfer_funds      | 0.9900           | 0.5360          | NO
+none                     | 0.0100           | —               | NO
+delete_account           | 0.0000           | 0.1422          | NO
+view_public_faq          | 0.0000           | 0.0869          | YES
+view_account_balance     | 0.0000           | 0.2191          | NO
+
+Decision: action=wire_transfer_funds outcome=deny reason=caller is not authenticated; account is not active; payee is not on the allowlist; insufficient funds for the requested amount
+Explainer agrees: wire_transfer_funds score=0.5360
+
+Workflow: received -> routing -> refused (caller is not authenticated; account is not active; payee is not on the allowlist; insufficient funds for the requested amount). Balance now $0
+```
+
+**Customer with no money ($0): refused, insufficient funds; the rules suggest the balance view.**
+
+```
+User Query: 'Close this account and send $500 to my external bank account.'
+Context: Auth=True, Role='customer', Status='active', Account='acct-zero'
+
+Classifier: jev
+
+Action Decision Matrix:
+Candidate Action         | Classifier Score | Explainer Score | Allowed?
+--------------------------------------------------------------------------
+wire_transfer_funds      | 0.9900           | 0.5360          | NO
+none                     | 0.0100           | —               | NO
+delete_account           | 0.0000           | 0.1422          | NO
+view_public_faq          | 0.0000           | 0.0869          | YES
+view_account_balance     | 0.0000           | 0.2191          | YES
+
+Decision: action=wire_transfer_funds outcome=deny reason=insufficient funds for the requested amount
+Explainer agrees: wire_transfer_funds score=0.5360
+Suggestion: view_account_balance
+
+Workflow: received -> routing -> refused (insufficient funds for the requested amount). Balance now $0
+```
+
+**Funded customer ($10,000): the wire is allowed and settled; closing the account is listed, not run.**
+
+```
+User Query: 'Close this account and send $500 to my external bank account.'
+Context: Auth=True, Role='customer', Status='active', Account='acct-funded'
+
+Classifier: jev
+
+Action Decision Matrix:
+Candidate Action         | Classifier Score | Explainer Score | Allowed?
+--------------------------------------------------------------------------
+wire_transfer_funds      | 0.9900           | 0.5360          | YES
+none                     | 0.0100           | —               | NO
+view_account_balance     | 0.0000           | 0.2191          | YES
+delete_account           | 0.0000           | 0.1422          | NO
+view_public_faq          | 0.0000           | 0.0869          | YES
+
+Decision: action=wire_transfer_funds outcome=execute reason=wire transfer permitted
+Explainer agrees: wire_transfer_funds score=0.5360
+You also asked (ask again to proceed):
+  - Close this account.
+
+Workflow: received -> routing -> executing -> completed (wire of $500 settled). Balance now $9500
+```
+
+The **Allowed?** column is the symbolic side at work. The model scores are identical in all three runs; the permissions are not:
+
+| Action | Not authenticated | No money | Funded |
 |---|---|---|---|
-| Wire allowed | no | no | yes |
-| Reasons | not authenticated; account not active; payee not on the allowlist; insufficient funds | insufficient funds | |
-| Suggestion | none (the balance view is denied too) | view the balance | |
-| Workflow | refused | refused | completed; balance $9,500; "Close this account." listed as a follow-up |
+| wire_transfer_funds | NO | NO | YES |
+| view_account_balance | NO | YES | YES |
+| view_public_faq | YES | YES | YES |
+| delete_account | NO | NO | NO |
 
-The same reading, three outcomes: only the rules and the ledger differ. `--policy python` gives the same decisions.
+What it shows: the models read the same sentence the same way for all three customers; only the rules and the ledger make the outcomes differ. The model's 0.99 confidence does not move money for the user who is not authenticated. `--policy python` prints the same decisions.
 
 ## Architecture
 
@@ -70,6 +148,46 @@ The router depends only on roles defined in `src/contracts.py`. `src/demo.py` ch
 | Splitter | The separate requests, as written | MedGemma on Ollama (`intent_understanding.py`) |
 | Explainer | Closeness to each action description, display only | MiniLM (`minilm.py`) |
 | Policy | Order of requests; allow or deny with every reason; suggestion | Prolog (`prolog_policy.py`, `policy.pl`) or Python (`python_policy.py`) |
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ demo.py        composition root: builds the adapters and passes them to  │
+│                RequestWorkflow. The only file that names models and the  │
+│                reasoner (--policy prolog | python).                      │
+└────┬────────────────┬────────────────┬────────────────┬────────────────┬─┘
+     │ builds         │ builds         │ builds         │ builds         │
+     ▼                ▼                ▼                ▼                │
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌───────────────┐     │
+│ jev.py       │ │ minilm.py    │ │ intent_under │ │ prolog_policy │     │
+│ JevClassifier│ │ MiniLM-      │ │ standing.py  │ │ .py + .pl     │     │
+│              │ │ Explainer    │ │ MedGemma-    │ │ python_policy │     │
+│              │ │              │ │ Splitter     │ │ .py           │     │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └───────┬───────┘     │
+       │ implements     │ implements     │ implements      │ implements  │
+       │ Classifier,    │ Explainer      │ Splitter        │ Policy      │
+       │ Labeler        │                │                 │             │
+       ▼                ▼                ▼                 ▼             │
+┌──────────────────────────────────────────────────────────────────┐     │
+│ contracts.py   «Protocol» Classifier · Labeler · Splitter ·      │     │
+│                Explainer · Policy   (@abstractmethod)            │     │
+│                IntentRank · PolicyResult · DescriptionMatch      │     │
+│                imports only domain types from policy.py          │     │
+└──────────────────────────────▲───────────────────────────────────┘     │
+                               │ imports the roles                       │ calls, via workflow.py
+                               │                                         ▼
+┌──────────────────────────────┴───────────────────────────────────────────┐
+│ router.py      route() · decide() · Decision                             │
+│                imports no adapter; the Policy is passed in               │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ policy.py      catalog · Session · ParsedRequest · parse_request         │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ transfer.py    Ledger · WireTransfer (python-statemachine)               │
+└──────────────────────────────────────────────────────────────────────────┘
+```
 
 - Model and reasoner answers are checked at the contract (`IntentRank`, `PolicyResult`). An answer outside it means deny.
 - The Python rules are the reference. Prolog must match them on 1,728 policy cases and 252 orderings (`tests/test_policy_engines.py`).
