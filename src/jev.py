@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 
-from hybrid import IntentRank
+from router import IntentRank
 from policy import ACTION_CATALOG, NONE_ACTION
 
 # Jev confidence is a probability, not a cosine. Docs treat values under 0.5 as unsure.

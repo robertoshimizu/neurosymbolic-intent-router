@@ -2,10 +2,20 @@
 
 This repository is a small experiment in routing a user's sentence to an action without letting the model authorize the action.
 
-Two pieces of work sit side by side. They meet in one place: `route()` in `hybrid.py` uses the MedGemma splitter when Jev counts several requests.
+Two pieces of work sit side by side. They meet in one place: `route()` uses the MedGemma splitter when Jev counts several requests.
 
-- `src/hybrid.py` and `src/transfer.py` route a banking sentence. A classifier proposes an action. Rules about the session and the ledger decide whether that action may run. A wire then moves through a state machine and debits an in-memory balance once.
-- `src/intent_understanding.py` is a separate reading of a sentence. It asks a local model what the text supports, and it does not know about the router.
+- `src/router.py`, `src/policy.py` and `src/transfer.py` route a banking sentence. A classifier proposes an action. Rules about the session and the ledger decide whether that action may run. A wire then moves through a state machine and debits an in-memory balance once.
+- `src/intent_understanding.py` is a separate reading of a sentence. It asks a local model what the text supports. Only its `MedGemmaSplitter` is used by the router.
+
+The router depends on three roles, not on models. Each role is a small `Protocol` in `router.py`, and each model sits in its own file. Only the `__main__` demo names the models.
+
+| Role | Contract | Today | File |
+|---|---|---|---|
+| Classifier | `classify(text)`: action (or `none`), confidence, request count. `label(texts)`: one action per text. | Jev | `src/jev.py` |
+| Splitter | `split(text)`: the separate requests, in the order written | MedGemma | `src/intent_understanding.py` |
+| Explainer | `explain(text, action)`: a display-only note | MiniLM | `src/minilm.py` |
+
+Each adapter keeps its own calibration. Jev's 0.5 confidence floor lives in `jev.py` and turns unsure answers into `none`. MiniLM's 0.45 description-gap floor lives in `minilm.py`. `policy.py` holds the catalog, the precedence rule and `policy.decide()`, with no model code.
 
 `src/coffee.py` is only a short example of the `python-statemachine` library.
 
@@ -13,14 +23,14 @@ Two pieces of work sit side by side. They meet in one place: `route()` in `hybri
 
 ```bash
 uv sync
-uv run python src/hybrid.py
+uv run python src/router.py
 uv run python src/coffee.py
 uv run pytest -m "not integration"
 ```
 
-`hybrid.py` calls TypeSafe Jev when `TYPESAFE_API_KEY` is set in `.env`. That file is gitignored. MiniLM weights and embedding vectors are cached under `.cache/`, which is also gitignored. Hugging Face downloads use `HF_TOKEN` from the same `.env` file. Neither value is printed.
+The demo calls TypeSafe Jev when `TYPESAFE_API_KEY` is set in `.env`. That file is gitignored. MiniLM weights and embedding vectors are cached under `.cache/`, which is also gitignored. Hugging Face downloads use `HF_TOKEN` from the same `.env` file. Neither value is printed.
 
-The sentence reader and the splitter call local Ollama. They expect `medgemma:27b`. The full reading does not use the router; `route()` uses only `split_requests()`.
+The sentence reader and the splitter call local Ollama. They expect `medgemma:27b`. The full reading does not use the router; `route()` uses only the splitter.
 
 ```bash
 uv run pytest tests/test_intent_understanding.py -m integration -s
@@ -28,20 +38,20 @@ uv run pytest tests/test_intent_understanding.py -m integration -s
 
 ## The router
 
-`route()` in `src/hybrid.py` is the entry point.
+`route()` in `src/router.py` is the entry point.
 
 1. Jev receives the sentence in one call with two closed questions: which action (the four catalog actions plus `none`), and how many requests the sentence makes (`none`, `one`, `several`). Identity, role, and balance are not sent.
 2. If the count is not `several`, the sentence goes straight to `decide()` with that Jev answer. Most sentences stop here.
-3. If the count is `several`, MedGemma splits the sentence into plain requests in the user's own words. It does not choose actions. Jev then labels every split request in one call. A label under 0.5 confidence counts as `none`.
+3. If the count is `several`, MedGemma splits the sentence into plain requests in the user's own words. It does not choose actions. Jev then labels every split request in one call. The Jev adapter returns a label under 0.5 confidence as `none`.
 4. A fixed rule, `ACTION_PRECEDENCE`, orders the requests: reads, then the wire, then deletion, then `none`. Only the first goes to `decide()`. The others are listed as follow-ups and are not evaluated. If the first is denied, nothing is listed. If the split or the labeling fails, the sentence is denied.
 
 `decide()` then applies the rules.
 
-1. If Jev returns `none`, or its confidence is under 0.5, the outcome is deny and the reason is "no matching action". Banking rules do not run.
-2. If Jev commits to a catalog action, MiniLM scores the sentence against the written action descriptions. Those cosines are printed beside Jev's probabilities. They do not change the choice. A disagreement is labeled a description gap.
+1. If the classifier returns `none` (for Jev, also any answer under 0.5 confidence), the outcome is deny and the reason is "no matching action". Banking rules do not run.
+2. If the classifier commits to a catalog action, the explainer (MiniLM) scores the sentence against the written action descriptions. Those scores are printed beside the classifier's. They do not change the choice. A disagreement is labeled a description gap.
 3. Policy then uses the session and the ledger. A wire needs authentication, an active account, a parsed amount, an allowlisted payee, and enough balance. A deletion needs an authenticated admin. A wire or a deletion stops at confirmation. `WireTransfer` in `src/transfer.py` moves drafted, awaiting confirmation, authorized, submitted, settled. The ledger debits on settle, once per transfer id.
 
-If Jev cannot be called, MiniLM ranks the catalog alone and the request count is unknown, so the sentence is treated as one request. The fallback denies when the nearest cosine is under 0.45 or the top two are within 0.08.
+If the classifier is missing or cannot be called, the sentence is denied with "classifier unavailable". Nothing guesses in its place; the old MiniLM fallback was removed.
 
 ```
                        user sentence
@@ -52,7 +62,7 @@ If Jev cannot be called, MiniLM ranks the catalog alone and the request count is
                │  Jev: 1 call, 2 questions │
                │   • action (catalog+none) │
                │   • request_count         │
-               │  (Jev down → MiniLM rank) │
+               │  (Jev down → DENY)        │
                └─────────────┬─────────────┘
                              │
                request_count == "several"?
@@ -60,13 +70,13 @@ If Jev cannot be called, MiniLM ranks the catalog alone and the request count is
                 no                     yes
                  │                      ▼
                  │     ┌──────────────────────────────┐
-                 │     │ MedGemma split_requests()    │
+                 │     │ Splitter.split (MedGemma)    │
                  │     │ → plain request lines        │
                  │     └──────────────┬───────────────┘
                  │          fails or < 2 lines ──► DENY
                  │                    ▼
                  │     ┌──────────────────────────────┐
-                 │     │ Jev label_with_jev()         │
+                 │     │ Classifier.label (Jev)       │
                  │     │ 1 call, 1 question per line  │
                  │     └──────────────┬───────────────┘
                  │          fails ──────────────► DENY
@@ -81,14 +91,13 @@ If Jev cannot be called, MiniLM ranks the catalog alone and the request count is
                  ▼                    ▼
                ┌───────────────────────────┐
                │  decide()                 │
-               │  1. none / conf < 0.5     │──► DENY "no matching action"
-               │  2. MiniLM cosines        │    (explanation only, no vote)
+               │  1. action == none        │──► DENY "no matching action"
+               │  2. Explainer (MiniLM)    │    (explanation only, no vote)
                │  3. parse_request()       │    ($ amount, allowlisted payee)
                │  4. evaluate_action()     │──► DENY (policy reason)
                │     session + ledger      │
-               │  5. MiniLM-only gates     │──► DENY (score / margin)
-               │  6. wire or delete?       │──► NEEDS_CONFIRMATION
-               │  7. otherwise             │──► EXECUTE
+               │  5. wire or delete?       │──► NEEDS_CONFIRMATION
+               │  6. otherwise             │──► EXECUTE
                └─────────────┬─────────────┘
                              ▼
                Decision (+ follow_ups if not denied)
@@ -133,11 +142,11 @@ Each case was run once. How stable the count, the split, and the labels are acro
 
 TypeSafe's own guidance is that one choice should be a snap judgment, and that a sentence with several questions should be split into small questions whose answers the application combines. A low confidence is a handoff to a person or to a normal language model. Jev is not the component that finishes reading a complex sentence.
 
-MiniLM makes the gap visible. Each cosine is closeness to a description we wrote. It is not a calibrated probability, and it must not cast a second vote. When Jev is down, that same nearest-neighbor step is the whole decision, which brings back the original problem: an absurd sentence still receives whichever action is least far away.
+MiniLM makes the gap visible. Each cosine is closeness to a description we wrote. It is not a calibrated probability, and it must not cast a second vote. That is why it no longer ranks when Jev is down: as a fallback it gave an absurd sentence whichever action was least far away.
 
 ## The open task: read the sentence first
 
-`src/intent_understanding.py` is the attempt to read a sentence before any router exists. `hybrid.py` imports only its `split_requests()`; the full reading is not used by the router.
+`src/intent_understanding.py` is the attempt to read a sentence before any router exists. The router uses only its `MedGemmaSplitter`, wired in by the demo; the full reading is not used by the router.
 
 The prompt asks MedGemma 27B, through local Ollama with thinking turned off, to extract entities, relationships, events, causes, concepts, implicit facts, and temporal links. Each claim is marked:
 
@@ -159,7 +168,7 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 *Status: addressed, not proven.* Jev counts the requests, MedGemma splits, Jev labels each part, and a fixed rule picks the first. The second request is listed, not hidden. The evidence is one live run per sentence.
 
 **Similarity and probability are different scales.** MiniLM's 0.12 and Jev's 0.98 do not mean the same thing. Printing them in one column, or letting a cosine floor run before the label is known, produced denials that talked about banking rules for a sentence that was not a banking request.
-*Status: solved.* MiniLM only explains a Jev choice and never overrides it. Its score and margin floors apply only when MiniLM ranks alone. Unit tests cover each rule.
+*Status: solved.* MiniLM only explains a Jev choice and never overrides it, and it no longer ranks on its own. Each adapter keeps its own floor, so the router only sees an action or `none`. Unit tests cover each rule.
 
 **The amount in words and the amount in symbols diverged.** Jev treated "five thousand dollars" as a wire. The ledger rule never saw an amount, because the parser looked for `$5,000`.
 *Status: not solved.* The parser still accepts only a `$` figure. "The remaining cash" is not resolved to a balance either.
@@ -173,35 +182,37 @@ On the supplier passage, that reading keeps the withdrawal and the stopped shipp
 
 ## Tests
 
-`uv run pytest -m "not integration"` runs the unit tests. Integration tests call MiniLM, Jev, or MedGemma.
+`uv run pytest -m "not integration"` runs the unit tests. Integration tests call MiniLM, Jev, or MedGemma. Router tests use a fake classifier, splitter and explainer, so they check the router's rules, not the models' judgment.
 
 | Test | Goal | Type |
 |---|---|---|
-| `test_hybrid.py` | | |
+| `test_policy.py` | | |
 | parse_amount_with_comma_and_dollar | "$5,000" parses to 5000 and the payee binds | unit |
 | unknown_payee_does_not_bind | A payee outside the allowlist does not bind | unit |
 | guest_wire_denied | A signed-out guest cannot wire | unit |
 | delete_denied_for_customer | Only an admin may delete | unit |
+| `test_router.py` | | |
 | insufficient_funds_suggests_balance_view | A wire above the balance is denied and suggests the balance view | unit |
-| ambiguous_margin_denied | MiniLM alone: top two within 0.08 is denied | unit |
-| minilm_far_from_every_action_denied | MiniLM alone: nearest cosine under 0.45 is denied | unit |
 | confirm_then_settle_debits_once | Settlement debits once per transfer id | unit |
 | confirm_refused_when_balance_drained | Confirmation is refused when funds are gone | unit |
-| disk_cached_embed_does_not_load_model | A cached query vector skips the model | unit |
-| disk_cached_actions_do_not_load_model | Cached action vectors skip the model | unit |
-| jev_none_stops_before_policy | Jev `none` is denied before policy | unit |
-| jev_low_confidence_stops_before_policy | Jev under 0.5 is denied before policy | unit |
-| jev_wire_still_needs_confirmation | A wire chosen by Jev still needs confirmation | unit |
-| minilm_disagreement_does_not_override_jev | MiniLM never replaces Jev's choice | unit |
-| jev_failure_falls_back_to_minilm | Jev down means MiniLM ranks | unit |
+| jev_none_stops_before_policy | A `none` action is denied before policy | unit |
+| jev_wire_still_needs_confirmation | A wire chosen by the classifier still needs confirmation | unit |
+| minilm_disagreement_does_not_override_jev | The explainer never replaces the classifier's choice | unit |
+| classifier_failure_denies_without_guessing | A classifier that is down means deny, not a guess | unit |
 | route_orders_money_movement_before_deletion | Close + wire: the wire goes first, close is listed | unit |
 | route_denied_first_request_offers_no_follow_ups | A denied first request lists nothing | unit |
 | route_one_request_uses_the_single_jev_rank | One request skips the split | unit |
 | route_failed_split_denies_without_guessing | A failed split is denied | unit |
 | route_failed_labeling_denies_without_guessing | A failed labeling is denied | unit |
-| route_low_confidence_label_is_ordered_last | A label under 0.5 counts as `none` and goes last | unit |
-| minilm_ranks_wire_highest_for_canonical_sentence | Real MiniLM ranks the wire first | integration |
+| route_none_label_is_ordered_last | A `none` label goes last | unit |
 | live_jev_abstains_on_unrelated_sentence | Real Jev returns `none` for "capital of Portugal" | integration |
+| `test_jev.py` | | |
+| unsure_action_and_count_become_none | Jev answers under 0.5 become `none` and an unknown count | unit |
+| unsure_label_becomes_none_and_sure_label_is_kept | The same floor applies to split-request labels | unit |
+| `test_minilm.py` | | |
+| disk_cached_embed_does_not_load_model | A cached query vector skips the model | unit |
+| disk_cached_actions_do_not_load_model | Cached action vectors skip the model | unit |
+| minilm_agrees_with_wire_for_canonical_sentence | Real MiniLM agrees with the wire and shows no gap | integration |
 | `test_intent_understanding.py` | | |
 | prompt_appends_only_the_text | The prompt only appends the sentence | unit |
 | parser_keeps_items_without_a_statement_field | The JSON parser keeps MedGemma's own fields | unit |

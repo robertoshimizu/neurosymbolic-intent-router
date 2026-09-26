@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from hybrid import DescriptionMatch
+from router import DescriptionMatch
 from policy import ACTION_CATALOG
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -193,12 +193,12 @@ class MiniLMExplainer:
         similarities = cosine_scores(
             self.embedder.embed(text), self.embedder.action_embeddings())
         nearest = max(similarities, key=similarities.get)
-        chosen_cosine = float(similarities.get(action, 0.0))
+        chosen_score = float(similarities.get(action, 0.0))
         return DescriptionMatch(
             chosen=action,
             nearest=nearest,
-            nearest_cosine=similarities[nearest],
-            chosen_cosine=chosen_cosine,
+            nearest_score=similarities[nearest],
+            chosen_score=chosen_score,
             similarities=similarities,
-            description_gap=nearest != action or chosen_cosine < MIN_SCORE,
+            description_gap=nearest != action or chosen_score < MIN_SCORE,
         )

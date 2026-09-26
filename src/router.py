@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 
 from dotenv import load_dotenv
 
@@ -47,8 +47,8 @@ class DescriptionMatch:
 
     chosen: str
     nearest: str
-    nearest_cosine: float
-    chosen_cosine: float
+    nearest_score: float
+    chosen_score: float
     similarities: dict[str, float]
     description_gap: bool
 
@@ -67,7 +67,7 @@ class Decision:
     permissions: dict[str, bool]
     rule_trace: list[str] = field(default_factory=list)
     suggestion: str | None = None
-    source: Literal["jev", "minilm"] = "minilm"
+    source: str | None = None
     description_match: DescriptionMatch | None = None
     follow_ups: tuple[str, ...] = ()
 
@@ -94,7 +94,7 @@ class IntentRank:
     action: str
     scores: dict[str, float]
     confidence: float
-    source: Literal["jev", "minilm"]
+    source: str
     request_count: str | None = None
 
 
@@ -195,18 +195,18 @@ def decide(
     ]
     if description_match is not None:
         rule_trace.append(
-            f"minilm_nearest={description_match.nearest} "
-            f"cosine={description_match.nearest_cosine:.4f}"
+            f"explainer_nearest={description_match.nearest} "
+            f"score={description_match.nearest_score:.4f}"
         )
         rule_trace.append(
-            f"minilm_chosen_cosine={description_match.chosen_cosine:.4f}"
+            f"explainer_chosen_score={description_match.chosen_score:.4f}"
         )
         if description_match.agrees and not description_match.description_gap:
-            rule_trace.append("minilm_agrees=yes")
+            rule_trace.append("explainer_agrees=yes")
         elif not description_match.agrees:
             rule_trace.append("description_gap=nearest_differs")
         else:
-            rule_trace.append("description_gap=chosen_cosine_below_min_score")
+            rule_trace.append("description_gap=chosen_score_low")
 
     def _decision(
         outcome: Outcome,
@@ -311,19 +311,18 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
         f"Context: Auth={session.is_authenticated}, Role='{session.role}', "
         f"Status='{session.status}', Account='{session.account_id}'"
     )
-    score_label = "Jev Probability" if decision.source == "jev" else "Raw Similarity"
     show_similarity = decision.description_match is not None
-    print(f"\nRanker: {decision.source}")
+    print(f"\nClassifier: {decision.source}")
     print("\nAction Decision Matrix:")
     if show_similarity:
         print(
-            f"{'Candidate Action':<24} | {'Jev Probability':<16} | "
-            f"{'Raw Similarity':<15} | {'Allowed?':<8}"
+            f"{'Candidate Action':<24} | {'Classifier Score':<16} | "
+            f"{'Explainer Score':<15} | {'Allowed?':<8}"
         )
         print("-" * 74)
     else:
         print(
-            f"{'Candidate Action':<24} | {score_label:<16} | {'Allowed?':<8}"
+            f"{'Candidate Action':<24} | {'Classifier Score':<16} | {'Allowed?':<8}"
         )
         print("-" * 56)
     for act, score in sorted(
@@ -335,10 +334,10 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
             allowed_str = "YES" if decision.permissions.get(
                 act, False) else "NO"
         if show_similarity:
-            cosine = decision.description_match.similarities.get(act)
-            cosine_str = f"{cosine:.4f}" if cosine is not None else "—"
+            explained = decision.description_match.similarities.get(act)
+            explained_str = f"{explained:.4f}" if explained is not None else "—"
             print(
-                f"{act:<24} | {score:<16.4f} | {cosine_str:<15} | {allowed_str:<8}"
+                f"{act:<24} | {score:<16.4f} | {explained_str:<15} | {allowed_str:<8}"
             )
         else:
             print(f"{act:<24} | {score:<16.4f} | {allowed_str:<8}")
@@ -351,13 +350,13 @@ def print_decision(utterance: str, session: Session, decision: Decision) -> None
         match = decision.description_match
         if match.agrees and not match.description_gap:
             print(
-                f"MiniLM agrees: {match.nearest} cosine={match.chosen_cosine:.4f}"
+                f"Explainer agrees: {match.nearest} score={match.chosen_score:.4f}"
             )
         else:
             print(
                 "Description gap: "
-                f"MiniLM nearest={match.nearest} ({match.nearest_cosine:.4f}); "
-                f"Jev action cosine={match.chosen_cosine:.4f}"
+                f"explainer nearest={match.nearest} ({match.nearest_score:.4f}); "
+                f"chosen action score={match.chosen_score:.4f}"
             )
     if decision.follow_ups:
         print("You also asked (ask again to proceed):")

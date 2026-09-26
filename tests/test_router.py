@@ -1,4 +1,4 @@
-"""Tests for the hybrid action router and wire-transfer ledger."""
+"""Tests for the action router and wire-transfer ledger."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hybrid import (
+from router import (
     ACTION_CATALOG,
     Decision,
     IntentRank,
