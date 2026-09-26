@@ -2,7 +2,7 @@
 
 **Models interpret, rules decide.** Language models are used only to understand the text; they never choose an action.
 
-`#MedGemma` `#Qwen3.8` `#MiniLM` `#SentenceTransformers` `#Jev` `#python-statemachine` `#StateMachine` `#FiniteStateMachine` `#NeuroSymbolic` `#NeuroSymbolicAI` `#IntentClassification` `#LLM` `#NLP` `#Ollama` `#Instructor` `#Pydantic` `#Pyright` `#Python` `#FailClosed` `#StructuredOutput`
+`#MedGemma` `#Qwen3.8` `#MiniLM` `#SentenceTransformers` `#Jev` `#python-statemachine` `#StateMachine` `#FiniteStateMachine` `#NeuroSymbolic` `#NeuroSymbolicAI` `#IntentClassification` `#LLM` `#NLP` `#Ollama` `#Instructor` `#Pydantic` `#Pyright` `#Python` `#Prolog` `#SWIProlog` `#FailClosed` `#StructuredOutput`
 
 ## Goal
 
@@ -62,7 +62,7 @@ In many agent designs the model chooses the next step. Here the model's output i
 
 - **Neural parts interpret.** A classifier reads which catalog intent the text expresses (or none) and counts the requests, a splitter separates a sentence with several requests, and an explainer shows how close the sentence is to each intent's description. None of them chooses or authorizes an action. Each is a swappable model behind a contract (Jev, MedGemma and MiniLM today).
 - **Symbolic parts decide.**
-  - Policy rules check the session and the ledger.
+  - Policy rules check the session and the ledger. The reasoner is swappable: SWI-Prolog (`policy.pl`) by default, or the same rules in Python.
   - A fixed precedence rule orders multiple requests.
   - Contract checks reject classifier and labeler output outside the catalog or outside its expected shape.
 - **A state machine holds it all.** Every request goes through `RequestWorkflow`: `received` → `routing` → `refused` or `executing` → `completed` or `failed`. `routing` is one state in which the neural and symbolic parts work together (it runs `route()`), and the rules' decision is its only exit. While executing, a wire runs its own `WireTransfer` (drafted, authorized, submitted, settled), and a deletion closes the account in the ledger.
@@ -71,13 +71,15 @@ The design fails closed. A sentence is denied when a model is unsure, unavailabl
 
 ## Demo
 
-One sentence, three bank customers. Output of `uv run python src/demo.py` on 2026-09-26: one run, trimmed, not edited. It needs Jev (`TYPESAFE_API_KEY`) and a local Ollama with `medgemma:27b`; see Run.
+One sentence, three bank customers. Output of `uv run --env-file .env python src/demo.py` on 2026-09-26, with the Prolog reasoner: one run, trimmed, not edited. It needs Jev (`TYPESAFE_API_KEY`), a local Ollama with `medgemma:27b`, and SWI-Prolog; see Run.
 
-The sentence makes two requests. Jev reads it as `several`, MedGemma splits it into "Close this account." and "Send $500 to my external bank account.", Jev labels each one, and the precedence rule puts the wire first. The split itself is not printed; the follow-up line comes from it.
+The sentence makes two requests. Jev reads it as `several`, MedGemma splits it into "Close this account." and "Send $500 to my external bank account.", Jev labels each one, and the precedence rule puts the wire first. The split itself is not printed; the follow-up line comes from it. A denial lists every reason the rules found, not only the first.
 
-**User not authenticated ($0): refused.**
+**User not authenticated ($0): refused for four reasons; no suggestion, because the rules would deny the balance view too.**
 
 ```
+Policy: prolog
+
 User Query: 'Close this account and send $500 to my external bank account.'
 Context: Auth=False, Role='unauthenticated', Status='inactive', Account='acct-unauthenticated'
 
@@ -88,14 +90,14 @@ Candidate Action         | Classifier Score | Explainer Score | Allowed?
 --------------------------------------------------------------------------
 wire_transfer_funds      | 0.9900           | 0.5360          | NO
 none                     | 0.0100           | —               | NO
+delete_account           | 0.0000           | 0.1422          | NO
 view_public_faq          | 0.0000           | 0.0869          | YES
 view_account_balance     | 0.0000           | 0.2191          | NO
-delete_account           | 0.0000           | 0.1422          | NO
 
-Decision: action=wire_transfer_funds outcome=deny reason=caller is not authenticated
+Decision: action=wire_transfer_funds outcome=deny reason=caller is not authenticated; account is not active; payee is not on the allowlist; insufficient funds for the requested amount
 Explainer agrees: wire_transfer_funds score=0.5360
 
-Workflow: received -> routing -> refused (caller is not authenticated). Balance now $0
+Workflow: received -> routing -> refused (caller is not authenticated; account is not active; payee is not on the allowlist; insufficient funds for the requested amount). Balance now $0
 ```
 
 **Customer with no money ($0): refused, insufficient funds; the rules suggest the balance view.**
@@ -111,9 +113,9 @@ Candidate Action         | Classifier Score | Explainer Score | Allowed?
 --------------------------------------------------------------------------
 wire_transfer_funds      | 0.9900           | 0.5360          | NO
 none                     | 0.0100           | —               | NO
-view_account_balance     | 0.0000           | 0.2191          | YES
-view_public_faq          | 0.0000           | 0.0869          | YES
 delete_account           | 0.0000           | 0.1422          | NO
+view_public_faq          | 0.0000           | 0.0869          | YES
+view_account_balance     | 0.0000           | 0.2191          | YES
 
 Decision: action=wire_transfer_funds outcome=deny reason=insufficient funds for the requested amount
 Explainer agrees: wire_transfer_funds score=0.5360
@@ -135,9 +137,9 @@ Candidate Action         | Classifier Score | Explainer Score | Allowed?
 --------------------------------------------------------------------------
 wire_transfer_funds      | 0.9900           | 0.5360          | YES
 none                     | 0.0100           | —               | NO
-view_public_faq          | 0.0000           | 0.0869          | YES
 view_account_balance     | 0.0000           | 0.2191          | YES
 delete_account           | 0.0000           | 0.1422          | NO
+view_public_faq          | 0.0000           | 0.0869          | YES
 
 Decision: action=wire_transfer_funds outcome=execute reason=wire transfer permitted
 Explainer agrees: wire_transfer_funds score=0.5360
@@ -156,7 +158,7 @@ The **Allowed?** column is the symbolic side at work. The model scores are ident
 | view_public_faq | YES | YES | YES |
 | delete_account | NO | NO | NO |
 
-What it shows: the models read the same sentence the same way for all three customers; only the rules and the ledger make the outcomes differ. The model's 0.99 confidence does not move money for the user who is not authenticated.
+What it shows: the models read the same sentence the same way for all three customers; only the rules and the ledger make the outcomes differ. The model's 0.99 confidence does not move money for the user who is not authenticated. `--policy python` prints the same decisions.
 
 ## Status
 
@@ -164,7 +166,6 @@ What it shows: the models read the same sentence the same way for all three cust
 
 Next steps:
 - a labelled evaluation set, with a model-only baseline to compare against;
-- turning the per-action rules in `policy.py` into data;
 - parsing amounts written in words.
 
 ## Repository map
@@ -172,17 +173,19 @@ Next steps:
 | Path | Role |
 |---|---|
 | `src/router.py` | `route()` and `decide()`: orchestration, with no model code |
-| `src/contracts.py` | The roles models must implement, and the checks on their output |
-| `src/policy.py` | Catalog, precedence rule and banking policy (symbolic) |
+| `src/contracts.py` | The roles models and reasoners must implement, and the checks on their output |
+| `src/policy.py` | Catalog, precedence rule, session types, amount parsing, and the banking rules as a Python table (`RULES`, `SUGGESTIONS`) |
+| `src/policy.pl` | The same banking rules in Prolog |
+| `src/python_policy.py`, `src/prolog_policy.py` | Reasoner adapters (symbolic): `PythonPolicy` and `PrologPolicy` |
 | `src/workflow.py` | `RequestWorkflow` state machine: from the sentence, through routing, to its effect |
 | `src/transfer.py` | `WireTransfer` state machine, and the ledger (balances, once-only debits, closed accounts) |
 | `src/jev.py`, `src/minilm.py`, `src/intent_understanding.py` | Model adapters (neural). |
-| `src/demo.py` | Wires the models together and runs three sessions |
+| `src/demo.py` | Wires the models and the reasoner together and runs three sessions |
 | `src/coffee.py` | A minimal `python-statemachine` example |
 
 ## Architecture
 
-The router never names a model. `src/contracts.py` defines four roles as `Protocol`s, plus the types they exchange. It imports only the action catalog from `policy.py`, and `IntentRank` rejects any model value outside the contract (an action not in the catalog, a confidence outside 0..1, an unknown request count, a non-numeric score) before the router sees it. Each model is an adapter in its own file that explicitly subclasses the role it fulfils. `src/demo.py` is the composition root: it builds the adapters and hands them to `RequestWorkflow`, which runs `route()` in its `routing` state. Swapping a model means writing a new adapter that subclasses the same roles and changing one line in `demo.py`.
+The router never names a model or a reasoner. `src/contracts.py` defines five roles as `Protocol`s, plus the types they exchange. It imports only domain types from `policy.py` (the catalog, `Session`, `ParsedRequest`). `IntentRank` rejects any model value outside the contract (an action not in the catalog, a confidence outside 0..1, an unknown request count, a non-numeric score), and `PolicyResult` rejects any reasoner answer outside it (no reasons, a non-string reason, a suggestion outside the catalog or on an allowed action), before the router sees them. Each model and each reasoner is an adapter in its own file that explicitly subclasses the role it fulfils. `src/demo.py` is the composition root: it builds the adapters and hands them to `RequestWorkflow`, which runs `route()` in its `routing` state. Swapping a model or a reasoner means writing a new adapter that subclasses the same role and changing one line in `demo.py`.
 
 | Role | Contract | Today | File |
 |---|---|---|---|
@@ -190,6 +193,7 @@ The router never names a model. `src/contracts.py` defines four roles as `Protoc
 | Labeler | `label(texts)`: one action per request, in one call. `None` means unavailable. | Jev | `src/jev.py` |
 | Splitter | `split(text)`: the separate requests, in the order written | MedGemma | `src/intent_understanding.py` |
 | Explainer | `explain(text, action)`: a display-only note on the chosen action | MiniLM | `src/minilm.py` |
+| Policy | `evaluate(action, session, balance, parsed)`: allowed or not, every reason, and a permitted action to suggest | SWI-Prolog (default), Python | `src/prolog_policy.py`, `src/python_policy.py` |
 
 **How the contract is enforced.** Python checks two different things, at two different times:
 - **A missing method** fails when the adapter is created. Every role method is an `@abstractmethod`, and each adapter subclasses its role explicitly (`class JevClassifier(Classifier, Labeler)`). Leaving out `label` raises `TypeError: Can't instantiate abstract class`.
@@ -197,39 +201,41 @@ The router never names a model. `src/contracts.py` defines four roles as `Protoc
 
 Both checks were confirmed by planting each violation in `jev.py`.
 
-Arrows mean "imports". Everything points to `contracts.py`, and nothing in it points back. The adapters (the details) and `router.py` (the high-level rules) both depend on the same abstraction, and neither depends on the other. Two kinds of arrows are left out: the adapters read the action catalog from `policy.py`, and `demo.py` also imports `policy.py` and `transfer.py` to build the sessions and the ledger. `workflow.py` is not drawn either: it sits above the router, runs `route()` in its `routing` state, and uses `transfer.py` to carry out the decision. `demo.py` starts every request through it.
+Arrows mean "imports". Everything points to `contracts.py`, and nothing in it points back. The adapters (the details) and `router.py` (the high-level rules) both depend on the same abstraction, and neither depends on the other. Two kinds of arrows are left out: the adapters read the catalog and the domain types from `policy.py`, and `demo.py` also imports `policy.py` and `transfer.py` to build the sessions and the ledger. `workflow.py` is not drawn either: it sits above the router, runs `route()` in its `routing` state, and uses `transfer.py` to carry out the decision. `demo.py` starts every request through it.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ demo.py        composition root: builds the adapters and passes them to  │
-│                RequestWorkflow. The only file that names models.         │
-└────────┬───────────────────┬──────────────────────┬─────────────────┬────┘
-         │ builds            │ builds               │ builds          │
-         ▼                   ▼                      ▼                 │
-┌─────────────────┐ ┌─────────────────┐ ┌──────────────────────┐      │
-│ jev.py          │ │ minilm.py       │ │ intent_understanding │      │
-│ JevClassifier   │ │ MiniLMExplainer │ │ .py                  │      │
-│                 │ │                 │ │ MedGemmaSplitter     │      │
-└────────┬────────┘ └────────┬────────┘ └──────────┬───────────┘      │
-         │ implements        │ implements          │ implements       │
-         │ Classifier,       │ Explainer           │ Splitter         │
-         │ Labeler           │                     │                  │
-         ▼                   ▼                     ▼                  │
-┌──────────────────────────────────────────────────────────────┐      │
-│ contracts.py   «Protocol» Classifier · Labeler · Splitter ·  │      │
-│                           Explainer   (@abstractmethod)      │      │
-│                IntentRank · DescriptionMatch · RequestCount  │      │
-│                imports only the catalog from policy.py       │      │
-└──────────────────────────────▲───────────────────────────────┘      │
-                               │ imports the roles                    │ calls, via workflow.py
-                               │                                      ▼
+│                RequestWorkflow. The only file that names models and the  │
+│                reasoner (--policy prolog | python).                      │
+└────┬────────────────┬────────────────┬────────────────┬────────────────┬─┘
+     │ builds         │ builds         │ builds         │ builds         │
+     ▼                ▼                ▼                ▼                │
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌───────────────┐     │
+│ jev.py       │ │ minilm.py    │ │ intent_under │ │ prolog_policy │     │
+│ JevClassifier│ │ MiniLM-      │ │ standing.py  │ │ .py + .pl     │     │
+│              │ │ Explainer    │ │ MedGemma-    │ │ python_policy │     │
+│              │ │              │ │ Splitter     │ │ .py           │     │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └───────┬───────┘     │
+       │ implements     │ implements     │ implements      │ implements  │
+       │ Classifier,    │ Explainer      │ Splitter        │ Policy      │
+       │ Labeler        │                │                 │             │
+       ▼                ▼                ▼                 ▼             │
+┌──────────────────────────────────────────────────────────────────┐     │
+│ contracts.py   «Protocol» Classifier · Labeler · Splitter ·      │     │
+│                Explainer · Policy   (@abstractmethod)            │     │
+│                IntentRank · PolicyResult · DescriptionMatch      │     │
+│                imports only domain types from policy.py          │     │
+└──────────────────────────────▲───────────────────────────────────┘     │
+                               │ imports the roles                       │ calls, via workflow.py
+                               │                                         ▼
 ┌──────────────────────────────┴───────────────────────────────────────────┐
 │ router.py      route() · decide() · Decision                             │
-│                imports no adapter                                        │
+│                imports no adapter; the Policy is passed in               │
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ policy.py      catalog · ACTION_PRECEDENCE · Session · policy.decide()   │
+│ policy.py      catalog · ACTION_PRECEDENCE · Session · parse_request     │
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -240,6 +246,8 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 ### Design decisions
 
 - **Roles, not models.** `route()` takes a `classifier`, a `labeler`, a `splitter` and an `explainer`; `decide()` takes a `classifier` and an `explainer`. Tests pass small fakes that subclass the same roles, so they check the router's rules, not a model's judgment.
+- **The reasoner is a role too.** `route()`, `decide()` and `RequestWorkflow` require a `policy`: leaving it out raises `TypeError`, and pyright flags it. A reasoner that errors denies with "policy unavailable". An OWL reasoner, or any other, would be one more adapter.
+- **Python is the reference reasoner.** `PythonPolicy` stays, and `test_policy_engines.py` requires every other reasoner to return the same verdict, reasons (in order) and suggestion on 1,728 combinations of session, amount, payee and balance.
 - **Contracts in their own module.** Adapters import `contracts.py`, not the router, so they can be written, tested and replaced without loading the router.
 - **Classifying and labelling are separate roles.** A replacement model may classify one sentence well but not label a batch in one call. Jev happens to provide both, so the demo passes it twice.
 - **Each adapter owns its calibration.** Jev's 0.5 confidence floor lives in `jev.py` and turns an unsure answer into `none`. MiniLM's 0.45 description-gap floor lives in `minilm.py`. The router sees only an action or `none`, so two scales never meet in one rule.
@@ -247,26 +255,34 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 - **The explainer never votes.** MiniLM's scores are printed beside the classifier's, and a disagreement is labelled a description gap. It never changes the decision, and if it fails the decision goes ahead without the note (`explainer=unavailable` in the trace).
 - **The splitter has one narrow job.** MedGemma only rewrites a sentence into separate requests. When it also chose actions, it copied the catalog descriptions and lost "$500", so labelling stays with the classifier.
 - **One classifier call per sentence.** That call returns both the action and the request count. A second call happens only when there are several requests, and it labels all of them at once.
-- **One table holds the rules.** Each action in `policy.py`'s `RULES` has its description, its precedence and its checks, run in order until one denies. Adding an action means adding one entry. `ACTION_CATALOG` and `ACTION_PRECEDENCE` are built from it.
+- **One table holds the rules.** Each action in `policy.py`'s `RULES` has its description, its precedence and its checks. Adding an action means adding one entry there and its clauses in `policy.pl`. `ACTION_CATALOG` and `ACTION_PRECEDENCE` are built from it.
+- **Every reason, not the first.** A denial lists every rule that failed, in a fixed order. A caller who is not authenticated and has no money is told both.
+- **The rules choose the suggestion.** After a denial, the reasoner may offer one other action, and only one it would itself permit: a wire denied for insufficient funds suggests the balance view, unless the caller may not see it. The router passes it through and does not read the reasons' text.
 - **A rule, not a model, orders requests.** `ACTION_PRECEDENCE` in `policy.py` puts reads, then the wire, then deletion, then `none`. Only the first request is decided. The rest are listed as follow-ups and never run on their own.
 - **No human confirmation step.** It would catch the router's mistakes and hide them from any measurement. The router is judged on its own decision. Human-in-the-loop could be tested later as a separate hypothesis.
 - **Neural and symbolic share one state.** `routing` runs the whole interpret-and-decide step, because a state needs one clear exit: the rules' decision, `deny` or `execute`. Splitting "interpret" and "decide" into separate states would give the models' reading its own transition. Inside `routing`, `route()` stays a pure function.
-- **Policy is pure.** `policy.decide(text, action, session, ledger)` judges an action that has already been chosen, with no model code.
+- **Policy is pure.** A reasoner judges an action that has already been chosen, from the session, the balance and the parsed request. It holds no model code and never writes to the ledger.
 - **Keys stay with their adapter.** `jev.py` and `minilm.py` each load their own key from `.env`. The router loads nothing.
 
 ### Known limits of this design
 
 - Pyright runs in `standard` mode, not `strict`. It checks every signature against the contracts, but it does not require every value to be typed.
+- The precedence rule and amount parsing are still Python only, outside the swappable reasoner.
+- The SWI-Prolog.app runtime on macOS finds its libraries only if `DYLD_FALLBACK_LIBRARY_PATH` is set when the process starts, so commands that load Prolog run with `uv run --env-file .env`.
 
 ## Run
 
 ```bash
 uv sync
-uv run python src/demo.py
+uv run --env-file .env python src/demo.py                  # Prolog reasoner (default)
+uv run --env-file .env python src/demo.py --policy python  # Python reasoner
 uv run python src/coffee.py
-uv run pytest -m "not integration"
+uv run pytest -m "not integration and not prolog"
+uv run --env-file .env pytest -m prolog                    # Prolog agrees with Python
 uv run pyright
 ```
+
+The Prolog reasoner needs SWI-Prolog 9 and the `janus-swi` bridge (installed by `uv sync`). With the macOS app, `.env` must contain `DYLD_FALLBACK_LIBRARY_PATH=/Applications/SWI-Prolog.app/Contents/Frameworks`. `--policy python` does not load Prolog.
 
 The demo calls TypeSafe Jev when `TYPESAFE_API_KEY` is set in `.env`. That file is gitignored. MiniLM weights and embedding vectors are cached under `.cache/`, which is also gitignored. Hugging Face downloads use `HF_TOKEN` from the same `.env` file. Neither value is printed.
 
@@ -289,7 +305,7 @@ uv run pytest tests/test_intent_understanding.py -m integration -s
 
 1. A `none` action is denied with "no matching action". Banking rules do not run. For Jev, an answer under 0.5 confidence has already become `none` inside the adapter.
 2. For a catalog action, the explainer (MiniLM) scores the sentence against the written action descriptions. The scores are printed beside the classifier's and never change the choice.
-3. `policy.decide()` uses the session and the ledger. A wire needs authentication, an active account, a parsed amount, an allowlisted payee, and enough balance. A deletion needs an authenticated admin. `route()` runs inside the `routing` state of `RequestWorkflow` (`src/workflow.py`). An allowed action then moves the workflow to `executing`, which re-checks the facts at that moment. A wire runs `WireTransfer` (drafted, authorized, submitted, settled); authorization requires the account to be open and the funds to cover the amount, and the ledger debits on settle, once per transfer id. A deletion closes the account, so later wires on it are refused. There is no human confirmation step: the router is judged on its own decision.
+3. The injected `Policy` judges the action from the session, the balance and the parsed request, and lists every reason it is denied. A wire needs authentication, an active account, a parsed amount, an allowlisted payee, and enough balance. A deletion needs an authenticated admin. A wire denied for insufficient funds suggests the balance view, if the caller may see it. `route()` runs inside the `routing` state of `RequestWorkflow` (`src/workflow.py`). An allowed action then moves the workflow to `executing`, which re-checks the facts at that moment. A wire runs `WireTransfer` (drafted, authorized, submitted, settled); authorization requires the account to be open and the funds to cover the amount, and the ledger debits on settle, once per transfer id. A deletion closes the account, so later wires on it are refused. There is no human confirmation step: the router is judged on its own decision.
 
 The chart shows calls at runtime. The Architecture section shows which module imports which.
 
@@ -336,10 +352,10 @@ The chart shows calls at runtime. The Architecture section shows which module im
           │    "no matching action"          │
           │ 2. Explainer.explain             │
           │    display only, no vote         │
-          │ 3. policy.decide()     policy.py │
-          │    parse_request, then           │
-          │    evaluate_action with          │
-          │    session + ledger ──► DENY     │
+          │ 3. parse_request       policy.py │
+          │ 4. Policy.evaluate  prolog|python│
+          │    session + balance ──► DENY    │
+          │    (all reasons, suggestion)     │
           │    allowed ──► EXECUTE           │
           └────────────────┬─────────────────┘
                            ▼
@@ -449,7 +465,7 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 
 ## Tests
 
-`uv run pytest -m "not integration"` runs the unit tests, including pyright, so one command checks both the contracts' signatures and their meaning. Integration tests call MiniLM, Jev, or MedGemma. To check a new adapter, add it to the role's fixture in `test_contracts.py`. Router tests use a fake classifier, splitter and explainer, so they check the router's rules, not the models' judgment.
+`uv run pytest -m "not integration and not prolog"` runs the unit tests, including pyright, so one command checks both the contracts' signatures and their meaning. Integration tests call MiniLM, Jev, or MedGemma. To check a new adapter, add it to the role's fixture in `test_contracts.py`. Router tests use a fake classifier, splitter and explainer, so they check the router's rules, not the models' judgment.
 
 | Test | Goal | Type |
 |---|---|---|
@@ -460,6 +476,7 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 | delete_denied_for_customer | Only an admin may delete | unit |
 | `test_router.py` | | |
 | insufficient_funds_suggests_balance_view | A wire above the balance is denied and suggests the balance view | unit |
+| no_suggestion_the_policy_would_deny | An unauthenticated caller with no funds is not offered the balance view | unit |
 | authorize_then_settle_debits_once | Settlement debits once per transfer id | unit |
 | authorize_refused_when_balance_drained | Authorization is refused when funds are gone | unit |
 | jev_none_stops_before_policy | A `none` action is denied before policy | unit |
@@ -500,6 +517,8 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 | unreachable_splitter_raises_instead_of_inventing_requests | A splitter that cannot reach its model raises, so the router denies | unit |
 | splitter_keeps_written_order_and_uses_its_settings | Requests come back in written order, from the configured model | unit |
 | explainer_flags_a_gap_below_its_floor (0.46, 0.44) | MiniLM flags a gap just below 0.45 and not just above | unit |
+| `test_policy_engines.py` | | |
+| prolog_policy_agrees_with_python_policy | Prolog returns the same verdict, reasons in order, and suggestion as Python on 1,728 cases | integration (prolog) |
 | `test_structured_output.py` | | |
 | classify_returns_a_catalog_action (native, instructor) | A local Ollama model returns one catalog action in a valid shape; accuracy printed | integration (ollama) |
 | split_returns_a_list_of_requests (native, instructor) | A local Ollama model returns a list of requests in a valid shape; accuracy printed | integration (ollama) |

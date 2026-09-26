@@ -128,7 +128,9 @@ def build_demo_world() -> tuple[dict[str, Session], Ledger]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", choices=("prolog", "python"), default="prolog")
-    policy = build_policy(parser.parse_args().policy)
+    policy_name = parser.parse_args().policy
+    policy = build_policy(policy_name)
+    print(f"Policy: {policy_name}")
     utterance = "Close this account and send $500 to my external bank account."
     sessions, ledger = build_demo_world()
     classifier = JevClassifier()
