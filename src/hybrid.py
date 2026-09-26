@@ -1,13 +1,12 @@
-"""Neuro-symbolic action router: Jev ranking, MiniLM fallback, session policy."""
+"""Neuro-symbolic action router: Classifier ranking, MiniLM fallback, session policy."""
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import numpy as np
 from dotenv import load_dotenv
@@ -50,9 +49,6 @@ def _load_env() -> None:
 _load_env()
 MIN_SCORE = 0.45
 MIN_MARGIN = 0.08
-# Jev confidence is a probability, not a cosine. Docs treat values under 0.5 as unsure.
-JEV_MIN_CONFIDENCE = 0.5
-NONE_CRITERION = "The utterance is not a request for any of these banking actions"
 
 @dataclass(frozen=True)
 class DescriptionMatch:
@@ -281,57 +277,12 @@ class IntentRank:
     request_count: str | None = None
 
 
-IntentRanker = Callable[[str], IntentRank | None]
+class Classifier(Protocol):
+    """Picks catalog actions. Unsure answers come back as `none`; None means unavailable."""
 
+    def classify(self, text: str) -> IntentRank | None: ...
 
-def rank_with_jev(utterance: str) -> IntentRank | None:
-    """Ask Jev which catalog action the utterance is. None means fall back."""
-    _load_env()
-    if not os.environ.get("TYPESAFE_API_KEY"):
-        return None
-    try:
-        from typesafe_sdk import Choice, TypeSafeClient
-
-        criteria = {**ACTION_CATALOG, NONE_ACTION: NONE_CRITERION}
-        with TypeSafeClient() as client:
-            response = client.system_one(
-                state=utterance,
-                questions={
-                    "action": Choice(
-                        instructions=(
-                            "Which banking action is the user asking for? "
-                            "Choose none if the request is not one of these actions."
-                        ),
-                        criteria=criteria,
-                    ),
-                    "request_count": Choice(
-                        instructions=(
-                            "How many distinct things does the user ask the system to do? "
-                            "A mention of a future action that is only context does not count as a request."
-                        ),
-                        criteria={
-                            "none": "The text asks the system to do nothing",
-                            "one": "The text asks the system to do exactly one thing",
-                            "several": "The text asks the system to do two or more different things",
-                        },
-                    ),
-                },
-            )
-        answer = response.answers["action"]
-        count = response.answers["request_count"]
-        probabilities = {str(label): float(prob)
-                         for label, prob in answer.probabilities.items()}
-        return IntentRank(
-            action=str(answer.choice),
-            scores=probabilities,
-            confidence=float(answer.confidence),
-            source="jev",
-            request_count=str(count.choice) if float(
-                count.confidence) >= JEV_MIN_CONFIDENCE else None,
-        )
-    except Exception:
-        print("Jev unavailable; using MiniLM fallback.", flush=True)
-        return None
+    def label(self, texts: tuple[str, ...]) -> list[IntentRank] | None: ...
 
 
 def _rank_minilm(
@@ -358,12 +309,12 @@ def _rank_minilm_from_text(utterance: str, embedder: ActionEmbedder | None) -> I
 def _select_rank(
     utterance: str,
     *,
-    intent_ranker: IntentRanker | None,
+    classifier: Classifier | None,
     query_vector: np.ndarray | None,
     action_embeddings: dict[str, np.ndarray] | None,
     embedder: ActionEmbedder | None,
 ) -> IntentRank:
-    """Jev first, unless the caller injected vectors or a ranker. MiniLM is the fallback."""
+    """The classifier first. MiniLM when there is none, or it is unavailable."""
     injected = query_vector is not None and action_embeddings is not None
 
     def minilm() -> IntentRank:
@@ -371,35 +322,32 @@ def _select_rank(
             return _rank_minilm(query_vector, action_embeddings)
         return _rank_minilm_from_text(utterance, embedder)
 
-    if intent_ranker is not None:
-        try:
-            rank = intent_ranker(utterance)
-        except Exception:
-            print("Jev unavailable; using MiniLM fallback.", flush=True)
-            rank = None
-        return rank if rank is not None else minilm()
-
-    if injected:
+    if classifier is None:
         return minilm()
-
-    rank = rank_with_jev(utterance)
-    return rank if rank is not None else minilm()
+    try:
+        rank = classifier.classify(utterance)
+    except Exception:
+        rank = None
+    if rank is None:
+        print("Classifier unavailable; using MiniLM fallback.", flush=True)
+        return minilm()
+    return rank
 
 
 def _explain_with_minilm(
     utterance: str,
     chosen_action: str,
     *,
-    intent_ranker: IntentRanker | None,
+    classifier: Classifier | None,
     query_vector: np.ndarray | None,
     action_embeddings: dict[str, np.ndarray] | None,
     embedder: ActionEmbedder | None,
 ) -> DescriptionMatch | None:
-    """Cosines for a committed Jev label. Fake rankers skip the model unless vectors are injected."""
+    """Cosines for a committed Jev label. Fake classifiers skip the model unless vectors are injected."""
     injected = query_vector is not None and action_embeddings is not None
     if injected:
         similarity = _rank_minilm(query_vector, action_embeddings)
-    elif intent_ranker is None:
+    elif classifier is None:
         similarity = _rank_minilm_from_text(utterance, embedder)
     else:
         return None
@@ -420,21 +368,20 @@ def decide(
     query_vector: np.ndarray | None = None,
     action_embeddings: dict[str, np.ndarray] | None = None,
     embedder: ActionEmbedder | None = None,
-    intent_ranker: IntentRanker | None = None,
+    classifier: Classifier | None = None,
     min_score: float = MIN_SCORE,
     min_margin: float = MIN_MARGIN,
-    jev_min_confidence: float = JEV_MIN_CONFIDENCE,
     rank: IntentRank | None = None,
 ) -> Decision:
     """Rank the utterance, judge the top raw intent, and return a Decision.
 
-    Jev `none` or low confidence stops before policy. A denied
+    A `none` action stops before policy. A denied
     catalog intent stays denied and is never replaced by FAQ. A precomputed
     `rank` skips ranking.
     """
     rank = rank or _select_rank(
         utterance,
-        intent_ranker=intent_ranker,
+        classifier=classifier,
         query_vector=query_vector,
         action_embeddings=action_embeddings,
         embedder=embedder,
@@ -442,9 +389,7 @@ def decide(
     balance = ledger.get_balance(session.account_id)
     scores = rank.scores
 
-    if rank.source == "jev" and (
-        rank.action == NONE_ACTION or rank.confidence < jev_min_confidence
-    ):
+    if rank.action == NONE_ACTION:
         return Decision(
             action=NONE_ACTION,
             outcome="deny",
@@ -461,15 +406,11 @@ def decide(
 
     top_action = rank.action
     description_match = None
-    if (
-        rank.source == "jev"
-        and top_action in ACTION_CATALOG
-        and rank.confidence >= jev_min_confidence
-    ):
+    if rank.source == "jev" and top_action in ACTION_CATALOG:
         description_match = _explain_with_minilm(
             utterance,
             top_action,
-            intent_ranker=intent_ranker,
+            classifier=classifier,
             query_vector=query_vector,
             action_embeddings=action_embeddings,
             embedder=embedder,
@@ -561,47 +502,6 @@ def decide(
 
 
 Splitter = Callable[[str], tuple[str, ...]]
-Labeler = Callable[[tuple[str, ...]], list[IntentRank] | None]
-
-
-def label_with_jev(requests: tuple[str, ...]) -> list[IntentRank] | None:
-    """One Jev call, one catalog question per split request. None means unavailable."""
-    _load_env()
-    if not os.environ.get("TYPESAFE_API_KEY"):
-        return None
-    try:
-        from typesafe_sdk import Choice, TypeSafeClient
-
-        criteria = {**ACTION_CATALOG, NONE_ACTION: NONE_CRITERION}
-        state = "\n".join(f"Request {i}: {text}" for i,
-                          text in enumerate(requests, start=1))
-        with TypeSafeClient() as client:
-            response = client.system_one(
-                state=state,
-                questions={
-                    f"request_{i}": Choice(
-                        instructions=f"Which banking action does Request {i} ask for? Choose none if it is not one of these actions.",
-                        criteria=criteria,
-                    )
-                    for i in range(1, len(requests) + 1)
-                },
-            )
-        ranks = []
-        for i in range(1, len(requests) + 1):
-            answer = response.answers[f"request_{i}"]
-            ranks.append(
-                IntentRank(
-                    action=str(answer.choice),
-                    scores={str(label): float(prob)
-                            for label, prob in answer.probabilities.items()},
-                    confidence=float(answer.confidence),
-                    source="jev",
-                )
-            )
-        return ranks
-    except Exception:
-        print("Jev labeling unavailable.", flush=True)
-        return None
 
 
 def _deny_split(utterance: str, session: Session, reason: str, trace: list[str]) -> Decision:
@@ -622,16 +522,16 @@ def route(
     ledger: Ledger,
     *,
     splitter: Splitter = split_requests,
-    labeler: Labeler = label_with_jev,
     **decide_kwargs,
 ) -> Decision:
-    """One Jev call. Several requests: MedGemma splits, Jev labels them in one call,
+    """One classifier call. Several requests: MedGemma splits, the classifier labels them in one call,
     the rule orders, policy decides the first, and the rest are listed.
     Never mutates the ledger.
     """
+    classifier = decide_kwargs.get("classifier")
     rank = _select_rank(
         utterance,
-        intent_ranker=decide_kwargs.get("intent_ranker"),
+        classifier=classifier,
         query_vector=decide_kwargs.get("query_vector"),
         action_embeddings=decide_kwargs.get("action_embeddings"),
         embedder=decide_kwargs.get("embedder"),
@@ -646,14 +546,11 @@ def route(
     if len(requests) < 2:
         return _deny_split(utterance, session, "several requests could not be separated", [f"split_count={len(requests)}"])
 
-    ranks = labeler(requests)
+    ranks = classifier.label(requests) if classifier is not None else None
     if ranks is None or len(ranks) != len(requests):
         return _deny_split(utterance, session, "several requests could not be labeled", [f"split_count={len(requests)}"])
 
-    jev_min_confidence = decide_kwargs.get(
-        "jev_min_confidence", JEV_MIN_CONFIDENCE)
-    labels = [NONE_ACTION if r.confidence <
-              jev_min_confidence else r.action for r in ranks]
+    labels = [r.action for r in ranks]
     ordered = sorted(range(len(requests)), key=lambda i: ACTION_PRECEDENCE.get(
         labels[i], len(ACTION_PRECEDENCE)))
     head = ordered[0]
@@ -768,13 +665,17 @@ def build_demo_world() -> tuple[dict[str, Session], Ledger]:
 
 
 if __name__ == "__main__":
+    from jev import JevClassifier
+
     utterance = "Close this account and send $500 to my external bank account."
     sessions, ledger = build_demo_world()
     embedder = ActionEmbedder()
+    classifier = JevClassifier()
 
     for key in ("guest", "zero", "funded"):
         session = sessions[key]
-        decision = route(utterance, session, ledger, embedder=embedder)
+        decision = route(utterance, session, ledger,
+                         classifier=classifier, embedder=embedder)
         balance = ledger.get_balance(session.account_id)
         print(f"\n--- Session '{key}' (balance=${balance}) ---")
         print_decision(utterance, session, decision)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -17,6 +18,7 @@ from hybrid import (
     decide,
     route,
 )
+from jev import JevClassifier
 from policy import Session
 from transfer import Ledger, WireTransfer, confirm_or_refuse
 
@@ -196,6 +198,10 @@ def test_disk_cached_actions_do_not_load_model(tmp_path) -> None:
     assert set(vectors) == set(catalog)
 
 
+def _never(*_args) -> None:
+    raise AssertionError("must not run")
+
+
 def _jev_rank(action: str, confidence: float) -> IntentRank:
     scores = {name: 0.05 for name in ACTION_CATALOG}
     scores["none"] = 0.05
@@ -208,12 +214,16 @@ def _jev_rank(action: str, confidence: float) -> IntentRank:
     )
 
 
+def _classifier(rank: IntentRank | None, labels=None) -> SimpleNamespace:
+    return SimpleNamespace(classify=lambda _text: rank, label=labels or _never)
+
+
 def test_jev_none_stops_before_policy() -> None:
     decision = decide(
         "What is the capital of Portugal?",
         _session("funded"),
         _ledger(Decimal("10000")),
-        intent_ranker=lambda _utterance: _jev_rank("none", 0.91),
+        classifier=_classifier(_jev_rank("none", 0.91)),
     )
     assert decision.outcome == "deny"
     assert decision.reason == "no matching action"
@@ -222,24 +232,12 @@ def test_jev_none_stops_before_policy() -> None:
     assert decision.source == "jev"
 
 
-def test_jev_low_confidence_stops_before_policy() -> None:
-    decision = decide(
-        WIRE_UTTERANCE,
-        _session("funded"),
-        _ledger(Decimal("10000")),
-        intent_ranker=lambda _utterance: _jev_rank("wire_transfer_funds", 0.2),
-    )
-    assert decision.outcome == "deny"
-    assert decision.reason == "no matching action"
-    assert decision.permissions == {}
-
-
 def test_jev_wire_still_needs_confirmation() -> None:
     decision = decide(
         WIRE_UTTERANCE,
         _session("funded"),
         _ledger(Decimal("10000")),
-        intent_ranker=lambda _utterance: _jev_rank("wire_transfer_funds", 0.86),
+        classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
     )
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "needs_confirmation"
@@ -255,7 +253,7 @@ def test_minilm_disagreement_does_not_override_jev() -> None:
         _ledger(Decimal("10000")),
         query_vector=faq_query,
         action_embeddings=_orthonormal_catalog(),
-        intent_ranker=lambda _utterance: _jev_rank("wire_transfer_funds", 0.86),
+        classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
     )
     assert decision.action == "wire_transfer_funds"
     assert decision.outcome == "needs_confirmation"
@@ -268,12 +266,12 @@ def test_minilm_disagreement_does_not_override_jev() -> None:
 
 def test_jev_failure_falls_back_to_minilm() -> None:
     def _boom(_utterance: str) -> IntentRank:
-        raise RuntimeError("ranker down")
+        raise RuntimeError("classifier down")
 
     decision = _decide_wire(
         _session("funded"),
         _ledger(Decimal("10000")),
-        intent_ranker=_boom,
+        classifier=SimpleNamespace(classify=_boom, label=_never),
     )
     assert decision.source == "minilm"
     assert decision.action == "wire_transfer_funds"
@@ -288,6 +286,7 @@ def test_live_jev_abstains_on_unrelated_sentence() -> None:
         "What is the capital of Portugal?",
         _session("funded"),
         _ledger(Decimal("10000")),
+        classifier=JevClassifier(),
     )
     assert decision.source == "jev"
     assert decision.reason == "no matching action"
@@ -307,11 +306,7 @@ def _labels(requests: tuple[str, ...]) -> list[IntentRank]:
 
 def _route(utterance: str, session: Session, ledger: Ledger, *, count: str | None, split, labeler=_labels, action: str = "none") -> Decision:
     rank = replace(_jev_rank(action, 0.9), request_count=count)
-    return route(utterance, session, ledger, splitter=split, labeler=labeler, intent_ranker=lambda _u: rank)
-
-
-def _never(*_args) -> None:
-    raise AssertionError("must not run")
+    return route(utterance, session, ledger, splitter=split, classifier=_classifier(rank, labeler))
 
 
 def test_route_orders_money_movement_before_deletion() -> None:
@@ -356,9 +351,9 @@ def test_route_failed_labeling_denies_without_guessing() -> None:
     assert decision.reason == "several requests could not be labeled"
 
 
-def test_route_low_confidence_label_is_ordered_last() -> None:
+def test_route_none_label_is_ordered_last() -> None:
     def _unsure_balance(requests: tuple[str, ...]) -> list[IntentRank]:
-        return [_jev_rank(LABELS[text], 0.3 if text == BALANCE else 0.95) for text in requests]
+        return [_jev_rank("none" if text == BALANCE else LABELS[text], 0.95) for text in requests]
 
     decision = _route(
         "Show my balance and send $500 to my external bank account.", _session("funded"), _ledger(Decimal("10000")),
