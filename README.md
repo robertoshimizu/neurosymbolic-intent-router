@@ -1,6 +1,10 @@
-# State machine playground
+# neurosymbolic-intent-router
 
-This repository is a small experiment in routing a user's sentence to an action without letting the model authorize the action.
+**Models propose, rules decide.** This is an experiment in neuro-symbolic routing. Language models read a user's sentence and propose a banking action. Symbolic rules, a fixed precedence order and a state machine decide whether the action may run. No model can authorize an action.
+
+The design aims at **precision and safety**. It fails closed: a sentence is denied when a model is unsure, unavailable, or answers outside its contract, and when an amount cannot be parsed. That is a deliberate cost to recall. For a bank, refusing and asking again costs less than acting wrongly.
+
+> **Not yet measured.** Precision and recall have not been computed. The results below are single runs on a handful of hand-picked sentences; they show how the design behaves, not how well it performs. A labelled evaluation set, with a model-only baseline, is the next step.
 
 Two pieces of work sit side by side. They meet in one place: the demo passes MedGemma's splitter to `route()` for sentences that make several requests.
 
