@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
@@ -10,7 +9,6 @@ from typing import Literal, Protocol
 
 from dotenv import load_dotenv
 
-from intent_understanding import split_requests
 import policy
 from policy import (
     ACTION_CATALOG,
@@ -243,7 +241,10 @@ def decide(
     return _decision("execute", policy_reason)
 
 
-Splitter = Callable[[str], tuple[str, ...]]
+class Splitter(Protocol):
+    """Separates a sentence into its requests, in the order written."""
+
+    def split(self, text: str) -> tuple[str, ...]: ...
 
 
 def _deny_split(utterance: str, session: Session, reason: str, trace: list[str]) -> Decision:
@@ -263,10 +264,10 @@ def route(
     session: Session,
     ledger: Ledger,
     *,
-    splitter: Splitter = split_requests,
+    splitter: Splitter | None = None,
     **decide_kwargs,
 ) -> Decision:
-    """One classifier call. Several requests: MedGemma splits, the classifier labels them in one call,
+    """One classifier call. Several requests: the splitter separates them, the classifier labels them in one call,
     the rule orders, policy decides the first, and the rest are listed.
     Never mutates the ledger.
     """
@@ -278,7 +279,7 @@ def route(
         return decide(utterance, session, ledger, rank=rank, **decide_kwargs)
 
     try:
-        requests = splitter(utterance)
+        requests = splitter.split(utterance) if splitter is not None else ()
     except Exception:
         requests = ()
     if len(requests) < 2:
@@ -403,6 +404,7 @@ def build_demo_world() -> tuple[dict[str, Session], Ledger]:
 
 
 if __name__ == "__main__":
+    from intent_understanding import MedGemmaSplitter
     from jev import JevClassifier
     from minilm import MiniLMExplainer
 
@@ -410,11 +412,12 @@ if __name__ == "__main__":
     sessions, ledger = build_demo_world()
     classifier = JevClassifier()
     explainer = MiniLMExplainer()
+    splitter = MedGemmaSplitter()
 
     for key in ("guest", "zero", "funded"):
         session = sessions[key]
         decision = route(utterance, session, ledger,
-                         classifier=classifier, explainer=explainer)
+                         classifier=classifier, explainer=explainer, splitter=splitter)
         balance = ledger.get_balance(session.account_id)
         print(f"\n--- Session '{key}' (balance=${balance}) ---")
         print_decision(utterance, session, decision)

@@ -80,6 +80,24 @@ def split_requests(
     return parse_split(content)
 
 
+class MedGemmaSplitter:
+    """The router's Splitter: MedGemma on local Ollama."""
+
+    def __init__(
+        self,
+        *,
+        model: str = "medgemma:27b",
+        endpoint: str = "http://127.0.0.1:11434/api/chat",
+        timeout_s: float = 180,
+    ) -> None:
+        self.model = model
+        self.endpoint = endpoint
+        self.timeout_s = timeout_s
+
+    def split(self, text: str) -> tuple[str, ...]:
+        return split_requests(text, model=self.model, endpoint=self.endpoint, timeout_s=self.timeout_s)
+
+
 def _chat(content: str, *, model: str, endpoint: str, timeout_s: float, as_json: bool) -> str:
     payload: dict = {
         "model": model,

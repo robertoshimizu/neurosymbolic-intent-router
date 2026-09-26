@@ -223,7 +223,7 @@ def _labels(requests: tuple[str, ...]) -> list[IntentRank]:
 
 def _route(utterance: str, session: Session, ledger: Ledger, *, count: str | None, split, labeler=_labels, action: str = "none") -> Decision:
     rank = replace(_jev_rank(action, 0.9), request_count=count)
-    return route(utterance, session, ledger, splitter=split, classifier=_classifier(rank, labeler))
+    return route(utterance, session, ledger, splitter=SimpleNamespace(split=split), classifier=_classifier(rank, labeler))
 
 
 def test_route_orders_money_movement_before_deletion() -> None:
