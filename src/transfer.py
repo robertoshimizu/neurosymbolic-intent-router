@@ -9,11 +9,18 @@ from statemachine.exceptions import TransitionNotAllowed
 
 
 class Ledger:
-    """Account balances with idempotent settlement by transfer id."""
+    """Account balances with idempotent settlement by transfer id, and account closure."""
 
     def __init__(self) -> None:
         self._balances: dict[str, Decimal] = {}
         self._settled: set[str] = set()
+        self._closed: set[str] = set()
+
+    def close(self, account_id: str) -> None:
+        self._closed.add(account_id)
+
+    def is_closed(self, account_id: str) -> bool:
+        return account_id in self._closed
 
     def set_balance(self, account_id: str, amount: Decimal) -> None:
         self._balances[account_id] = amount
@@ -39,24 +46,22 @@ class Ledger:
 
 
 class WireTransfer(StateChart):
-    """Lifecycle for a confirmed outbound wire against an in-memory ledger."""
+    """Lifecycle for an approved outbound wire against an in-memory ledger."""
 
     allow_event_without_transition = False
 
     drafted = State(initial=True)
-    awaiting_confirmation = State()
     authorized = State()
     submitted = State()
     settled = State(final=True)
     declined = State(final=True)
 
-    request_confirmation = drafted.to(awaiting_confirmation)
-    confirm = awaiting_confirmation.to(authorized, cond="funds_available")
+    # Funds are re-checked when the transfer is authorized, not when it was requested.
+    authorize = drafted.to(authorized, cond=["account_open", "funds_available"])
     submit = authorized.to(submitted)
     settle = submitted.to(settled)
     cancel = (
         drafted.to(declined)
-        | awaiting_confirmation.to(declined)
         | authorized.to(declined)
     )
 
@@ -74,6 +79,9 @@ class WireTransfer(StateChart):
         self.transfer_id = transfer_id
         super().__init__(**kwargs)
 
+    def account_open(self) -> bool:
+        return not self.ledger.is_closed(self.account_id)
+
     def funds_available(self) -> bool:
         return self.ledger.get_balance(self.account_id) >= self.amount
 
@@ -81,10 +89,10 @@ class WireTransfer(StateChart):
         self.ledger.debit(self.account_id, self.amount, self.transfer_id)
 
 
-def confirm_or_refuse(transfer: WireTransfer) -> bool:
-    """Confirm when funds cover the amount; otherwise leave state unchanged."""
+def authorize_or_refuse(transfer: WireTransfer) -> bool:
+    """Authorize when the account is open and funds cover the amount; otherwise leave state unchanged."""
     try:
-        transfer.send("confirm")
+        transfer.send("authorize")
         return True
     except TransitionNotAllowed:
         return False

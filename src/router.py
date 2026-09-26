@@ -176,13 +176,6 @@ def decide(
     if verdict.outcome == "deny":
         return _decision("deny", policy_reason, suggestion=verdict.suggestion)
 
-    if verdict.outcome == "needs_confirmation":
-        return _decision(
-            "needs_confirmation",
-            policy_reason,
-            trace_extra=["high_stakes=confirmation_required"],
-        )
-
     return _decision("execute", policy_reason)
 
 

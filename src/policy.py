@@ -18,7 +18,6 @@ ACTION_CATALOG: dict[str, str] = {
     "view_public_faq": "Open the public frequently asked questions page",
 }
 
-HIGH_STAKES_ACTIONS = frozenset({"wire_transfer_funds", "delete_account"})
 
 # Logical order for several requests: reads, then money movement, then deletion.
 # Ties keep the written order. `none` goes last so a real action runs first.
@@ -31,7 +30,7 @@ ACTION_PRECEDENCE: dict[str, int] = {
 
 AMOUNT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
 
-Outcome = Literal["deny", "execute", "needs_confirmation"]
+Outcome = Literal["deny", "execute"]
 
 
 @dataclass(frozen=True)
@@ -114,7 +113,7 @@ def evaluate_action(
 
 
 def decide(text: str, action: str, session: Session, ledger: Ledger) -> Verdict:
-    """Judge one already-chosen action. High-stakes actions stop at confirmation."""
+    """Judge one already-chosen action: deny, or execute."""
     parsed = parse_request(text, session.payee_allowlist)
     if action == NONE_ACTION:
         return Verdict("deny", "no matching action", parsed)
@@ -126,6 +125,4 @@ def decide(text: str, action: str, session: Session, ledger: Ledger) -> Verdict:
             else None
         )
         return Verdict("deny", reason, parsed, suggestion)
-    if action in HIGH_STAKES_ACTIONS:
-        return Verdict("needs_confirmation", reason, parsed)
     return Verdict("execute", reason, parsed)

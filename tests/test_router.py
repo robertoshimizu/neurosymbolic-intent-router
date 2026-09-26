@@ -17,7 +17,7 @@ from minilm import ActionEmbedder, MiniLMExplainer
 from policy import ACTION_CATALOG
 from router import Decision, decide, route
 from policy import Session
-from transfer import Ledger, WireTransfer, confirm_or_refuse
+from transfer import Ledger, WireTransfer, authorize_or_refuse
 
 
 def _orthonormal_catalog() -> dict[str, np.ndarray]:
@@ -75,7 +75,7 @@ def test_insufficient_funds_suggests_balance_view() -> None:
     assert decision.suggestion == "view_account_balance"
 
 
-def test_confirm_then_settle_debits_once() -> None:
+def test_authorize_then_settle_debits_once() -> None:
     ledger = _ledger(Decimal("10000"))
     transfer = WireTransfer(
         ledger=ledger,
@@ -83,8 +83,7 @@ def test_confirm_then_settle_debits_once() -> None:
         amount=Decimal("5000"),
         transfer_id="wire-1",
     )
-    transfer.send("request_confirmation")
-    assert confirm_or_refuse(transfer) is True
+    assert authorize_or_refuse(transfer) is True
     transfer.send("submit")
     transfer.send("settle")
     assert ledger.get_balance("acct") == Decimal("5000")
@@ -96,7 +95,7 @@ def test_confirm_then_settle_debits_once() -> None:
     assert ledger.get_balance("acct") == Decimal("5000")
 
 
-def test_confirm_refused_when_balance_drained() -> None:
+def test_authorize_refused_when_balance_drained() -> None:
     ledger = _ledger(Decimal("10000"))
     transfer = WireTransfer(
         ledger=ledger,
@@ -104,10 +103,9 @@ def test_confirm_refused_when_balance_drained() -> None:
         amount=Decimal("5000"),
         transfer_id="wire-2",
     )
-    transfer.send("request_confirmation")
     ledger.set_balance("acct", Decimal("0"))
-    assert confirm_or_refuse(transfer) is False
-    assert transfer.awaiting_confirmation.is_active
+    assert authorize_or_refuse(transfer) is False
+    assert transfer.drafted.is_active
     assert ledger.get_balance("acct") == Decimal("0")
 
 
@@ -184,7 +182,7 @@ def test_jev_none_stops_before_policy() -> None:
     assert decision.source == "jev"
 
 
-def test_jev_wire_still_needs_confirmation() -> None:
+def test_jev_wire_is_judged_by_policy() -> None:
     decision = decide(
         WIRE_UTTERANCE,
         _session("funded"),
@@ -192,7 +190,7 @@ def test_jev_wire_still_needs_confirmation() -> None:
         classifier=_classifier(_jev_rank("wire_transfer_funds", 0.86)),
     )
     assert decision.action == "wire_transfer_funds"
-    assert decision.outcome == "needs_confirmation"
+    assert decision.outcome == "execute"
     assert decision.source == "jev"
     assert decision.description_match is None
 
@@ -207,7 +205,7 @@ def test_minilm_disagreement_does_not_override_jev() -> None:
         explainer=MiniLMExplainer(_FixedEmbedder(faq_query, _orthonormal_catalog())),
     )
     assert decision.action == "wire_transfer_funds"
-    assert decision.outcome == "needs_confirmation"
+    assert decision.outcome == "execute"
     match = decision.description_match
     assert match is not None
     assert not match.agrees
@@ -228,7 +226,7 @@ def test_explainer_failure_keeps_the_decision() -> None:
         explainer=_BrokenExplainer(),
     )
     assert decision.action == "wire_transfer_funds"
-    assert decision.outcome == "needs_confirmation"
+    assert decision.outcome == "execute"
     assert decision.description_match is None
     assert "explainer=unavailable" in decision.rule_trace
 
@@ -292,7 +290,7 @@ def test_route_orders_money_movement_before_deletion() -> None:
     ledger = _ledger(Decimal("10000"))
     decision = _route(CLOSE_AND_WIRE, _session("admin", role="admin"), ledger, count="several", split=lambda _u: (CLOSE, WIRE_500))
     assert decision.action == "wire_transfer_funds"
-    assert decision.outcome == "needs_confirmation"
+    assert decision.outcome == "execute"
     assert decision.follow_ups == (CLOSE,)
     assert ledger.get_balance("acct") == Decimal("10000")
 
@@ -310,7 +308,7 @@ def test_route_one_request_uses_the_single_jev_rank() -> None:
         count="one", split=_never, labeler=_never, action="wire_transfer_funds",
     )
     assert decision.action == "wire_transfer_funds"
-    assert decision.outcome == "needs_confirmation"
+    assert decision.outcome == "execute"
     assert decision.follow_ups == ()
 
 

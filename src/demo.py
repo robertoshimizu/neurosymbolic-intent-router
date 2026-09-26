@@ -9,7 +9,8 @@ from jev import JevClassifier
 from minilm import MiniLMExplainer
 from policy import Session
 from router import Decision, route
-from transfer import Ledger, WireTransfer, confirm_or_refuse
+from transfer import Ledger
+from workflow import RequestWorkflow
 
 
 def print_decision(utterance: str, session: Session, decision: Decision) -> None:
@@ -124,22 +125,7 @@ if __name__ == "__main__":
         print(f"\n--- Session '{key}' (balance=${balance}) ---")
         print_decision(utterance, session, decision)
 
-        if decision.outcome == "needs_confirmation" and decision.action == (
-            "wire_transfer_funds"
-        ):
-            assert decision.parsed.amount is not None
-            transfer = WireTransfer(
-                ledger=ledger,
-                account_id=session.account_id,
-                amount=decision.parsed.amount,
-                transfer_id="wire-demo-1",
-            )
-            transfer.send("request_confirmation")
-            confirmed = confirm_or_refuse(transfer)
-            print(f"Confirmation accepted: {confirmed}")
-            if confirmed:
-                transfer.send("submit")
-                transfer.send("settle")
-                print(
-                    f"Settled. New balance: ${ledger.get_balance(session.account_id)}"
-                )
+        workflow = RequestWorkflow(decision, session, ledger, request_id=f"request-{key}")
+        workflow.send("decided")
+        state = next(iter(workflow.configuration)).id
+        print(f"Workflow: {state} ({workflow.note}). Balance now ${ledger.get_balance(session.account_id)}")

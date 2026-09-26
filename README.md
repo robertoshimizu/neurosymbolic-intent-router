@@ -1,17 +1,88 @@
 # neurosymbolic-intent-router
 
-**Models propose, rules decide.** This is an experiment in neuro-symbolic routing. Language models read a user's sentence and propose a banking action. Symbolic rules, a fixed precedence order and a state machine decide whether the action may run. No model can authorize an action.
+**Models propose, rules decide.**
 
-The design aims at **precision and safety**. It fails closed: a sentence is denied when a model is unsure, unavailable, or answers outside its contract, and when an amount cannot be parsed. That is a deliberate cost to recall. For a bank, refusing and asking again costs less than acting wrongly.
+## Goal
 
-> **Not yet measured.** Precision and recall have not been computed. The results below are single runs on a handful of hand-picked sentences; they show how the design behaves, not how well it performs. A labelled evaluation set, with a model-only baseline, is the next step.
+Turn a user's free-text request into an action in a workflow, with high precision: the workflow should not act on a misread request. The project explores how far a neuro-symbolic design gets there. Language models handle what language makes hard: what is being asked, and how many things. Symbolic components keep the authority: what is allowed, in what order, and how a transaction moves from start to finish. The long-term aim is to measure this: raise precision while giving up no more recall than the domain can afford.
 
-Two pieces of work sit side by side. They meet in one place: the demo passes MedGemma's splitter to `route()` for sentences that make several requests.
+Banking is the test domain, because the cost of a wrong action is obvious there.
 
-- `src/router.py`, `src/policy.py` and `src/transfer.py` route a banking sentence. A classifier proposes an action. Rules about the session and the ledger decide whether that action may run. A wire then moves through a state machine and debits an in-memory balance once.
-- `src/intent_understanding.py` is a separate reading of a sentence. It asks a local model what the text supports. Only its `MedGemmaSplitter` is used by the router.
+## Hypothesis
 
-`src/coffee.py` is only a short example of the `python-statemachine` library.
+**H1: Models propose, rules decide.** A workflow in which a language model only *proposes* an action, and symbolic rules *decide* whether it runs, acts wrongly less often than a workflow in which the model decides alone. The price is lower recall on requests the rules cannot verify.
+
+*Why we expect this:* language models are good at reading language, but their answers are not calibrated, can vary between runs, and can be confidently wrong. Rules cannot read language, but they are deterministic, auditable, and can refuse. Dividing the work plays to both strengths.
+
+**H2: The model never moves the workflow.** Choosing the right action is only half the risk. The other half is carrying it out: acting on a stale fact, running a step out of order, or moving money twice. An explicit finite state machine turns "only the rules' decision and the ledger's facts move the workflow" into structure:
+- events that are not allowed from the current state are rejected;
+- facts are re-checked when the action runs, not when it was requested (a wire is authorized only if the account is still open and the funds still cover it);
+- final states are final, and money moves once.
+
+In many agent designs the model chooses the next step. Here the model's output is only an input to the rules, and the state machine only accepts the rules' decision.
+
+**How we will test it (not done yet):**
+- Compare with a model-only baseline on a labelled set of sentences.
+- Measure precision and recall per action.
+- Count **wrong actions executed**, the number that matters most.
+- Count transitions the state machine rejected.
+
+## Approach
+
+```
+                    user's sentence
+                          │
+                          ▼
+  ┌──────────────── NEURAL · propose ────────────────┐
+  │  What is being asked? How many requests?         │
+  └────────────────────────┬─────────────────────────┘
+                           │ proposed action
+                           ▼
+  ┌──────────────── SYMBOLIC · decide ───────────────┐
+  │  Inside the contract? Which request first?       │
+  │  Allowed for this session and balance?           │
+  └────────────────────────┬─────────────────────────┘
+                           │ decision (deny / execute)
+                           ▼
+  ┌────────────── STATE MACHINE · execute ───────────┐
+  │  received ─┬─► refused                           │
+  │            └─► executing ─┬─► completed          │
+  │                           └─► failed             │
+  │  facts re-checked at execution; debit once       │
+  └──────────────────────────────────────────────────┘
+```
+
+
+- **Neural parts propose.** A classifier picks the requested action and counts the requests, a splitter separates a sentence with several requests, and an explainer shows how close the sentence is to each action's description. Each is a swappable model behind a contract (Jev, MedGemma and MiniLM today).
+- **Symbolic parts decide.**
+  - Policy rules check the session and the ledger.
+  - A fixed precedence rule orders multiple requests.
+  - Contract checks reject any model output outside the catalog or outside its expected shape.
+- **A state machine executes.** Every request goes through `RequestWorkflow`: `received`, then `refused` or `executing`, then `completed` or `failed`. The router's decision is the only event that moves it out of `received`. While executing, a wire runs its own `WireTransfer` (drafted, authorized, submitted, settled), and a deletion closes the account in the ledger.
+
+The design fails closed. A sentence is denied when a model is unsure, unavailable, or answers outside its contract, and when an amount cannot be parsed. That is a deliberate cost to recall: for a bank, refusing and asking again costs less than acting wrongly.
+
+## Status
+
+> **Not yet measured.** Precision and recall have not been computed. The results below are single runs on a handful of hand-picked sentences; they show how the design behaves, not how well it performs.
+
+Next steps:
+- a labelled evaluation set, with a model-only baseline to compare against;
+- turning the per-action rules in `policy.py` into data;
+- parsing amounts written in words.
+
+## Repository map
+
+| Path | Role |
+|---|---|
+| `src/router.py` | `route()` and `decide()`: orchestration, with no model code |
+| `src/contracts.py` | The roles models must implement, and the checks on their output |
+| `src/policy.py` | Catalog, precedence rule and banking policy (symbolic) |
+| `src/workflow.py` | `RequestWorkflow` state machine: from the router's decision to its effect |
+| `src/transfer.py` | `WireTransfer` state machine, and the ledger (balances, once-only debits, closed accounts) |
+| `src/jev.py`, `src/minilm.py`, `src/intent_understanding.py` | Model adapters (neural). `intent_understanding.py` also holds a separate experiment in reading a whole sentence. |
+| `src/demo.py` | Wires the models together and runs three sessions |
+| `src/coffee.py` | A minimal `python-statemachine` example |
 
 ## Architecture
 
@@ -30,7 +101,7 @@ The router never names a model. `src/contracts.py` defines four roles as `Protoc
 
 Both checks were confirmed by planting each violation in `jev.py`.
 
-Arrows mean "imports". Everything points to `contracts.py`, and nothing in it points back. The adapters (the details) and `router.py` (the high-level rules) both depend on the same abstraction, and neither depends on the other. Two kinds of arrows are left out: the adapters read the action catalog from `policy.py`, and `demo.py` also imports `policy.py` and `transfer.py` to build the sessions and the ledger.
+Arrows mean "imports". Everything points to `contracts.py`, and nothing in it points back. The adapters (the details) and `router.py` (the high-level rules) both depend on the same abstraction, and neither depends on the other. Two kinds of arrows are left out: the adapters read the action catalog from `policy.py`, and `demo.py` also imports `policy.py` and `transfer.py` to build the sessions and the ledger. `workflow.py` is not drawn either: it sits beside the router, takes the router's `Decision`, and uses `transfer.py` to carry it out. `demo.py` runs every decision through it.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -81,6 +152,8 @@ Arrows mean "imports". Everything points to `contracts.py`, and nothing in it po
 - **The splitter has one narrow job.** MedGemma only rewrites a sentence into separate requests. When it also chose actions, it copied the catalog descriptions and lost "$500", so labelling stays with the classifier.
 - **One classifier call per sentence.** That call returns both the action and the request count. A second call happens only when there are several requests, and it labels all of them at once.
 - **A rule, not a model, orders requests.** `ACTION_PRECEDENCE` in `policy.py` puts reads, then the wire, then deletion, then `none`. Only the first request is decided. The rest are listed as follow-ups and never run on their own.
+- **No human confirmation step.** It would catch the router's mistakes and hide them from any measurement. The router is judged on its own decision. Human-in-the-loop could be tested later as a separate hypothesis.
+- **Deciding is not a state; executing is.** `route()` is a pure function with nothing to wait for between its steps. Its `Decision` is the event that moves `RequestWorkflow`, whose states are the situations a request can be in.
 - **Policy is pure.** `policy.decide(text, action, session, ledger)` judges an action that has already been chosen, with no model code.
 - **Keys stay with their adapter.** `jev.py` and `minilm.py` each load their own key from `.env`. The router loads nothing.
 
@@ -120,7 +193,7 @@ uv run pytest tests/test_intent_understanding.py -m integration -s
 
 1. A `none` action is denied with "no matching action". Banking rules do not run. For Jev, an answer under 0.5 confidence has already become `none` inside the adapter.
 2. For a catalog action, the explainer (MiniLM) scores the sentence against the written action descriptions. The scores are printed beside the classifier's and never change the choice.
-3. `policy.decide()` uses the session and the ledger. A wire needs authentication, an active account, a parsed amount, an allowlisted payee, and enough balance. A deletion needs an authenticated admin. A wire or a deletion stops at confirmation. `WireTransfer` in `src/transfer.py` moves drafted, awaiting confirmation, authorized, submitted, settled. The ledger debits on settle, once per transfer id.
+3. `policy.decide()` uses the session and the ledger. A wire needs authentication, an active account, a parsed amount, an allowlisted payee, and enough balance. A deletion needs an authenticated admin. An allowed action is then executed by `RequestWorkflow` in `src/workflow.py`, which re-checks the facts at that moment. A wire runs `WireTransfer` (drafted, authorized, submitted, settled); authorization requires the account to be open and the funds to cover the amount, and the ledger debits on settle, once per transfer id. A deletion closes the account, so later wires on it are refused. There is no human confirmation step: the router is judged on its own decision.
 
 The chart shows calls at runtime. The Architecture section shows which module imports which.
 
@@ -171,27 +244,27 @@ The chart shows calls at runtime. The Architecture section shows which module im
           │    parse_request, then           │
           │    evaluate_action with          │
           │    session + ledger ──► DENY     │
-          │    wire or delete ──► CONFIRM    │
-          │    otherwise ──► EXECUTE         │
+          │    allowed ──► EXECUTE           │
           └────────────────┬─────────────────┘
                            ▼
           Decision (+ follow_ups if not denied)
                            │
                            ▼
-          print_decision()               demo.py
-                           │
-            needs confirmation + wire?
-                           ▼
           ┌──────────────────────────────────┐
-          │ WireTransfer         transfer.py │
-          │ drafted → awaiting_confirmation  │
-          │ → authorized → submitted →       │
-          │ settled → Ledger.debit()         │
-          │ (once per transfer id)           │
+          │ RequestWorkflow      workflow.py │
+          │ received ─ decided ─┬─► refused  │
+          │                     └─► executing│
+          │ executing ─┬─► completed         │
+          │            └─► failed            │
+          │ wire: WireTransfer   transfer.py │
+          │   drafted → authorized (account  │
+          │   open, funds re-checked) →      │
+          │   submitted → settled, debit once│
+          │ delete: close account in ledger  │
           └──────────────────────────────────┘
 ```
 
-On a clear sentence, "I want to send $5,000 to my external bank account.", the three sessions behave as follows. A guest is denied because they are not signed in. A customer with no balance is denied for insufficient funds. A customer with $10,000 is asked to confirm, and settlement leaves $5,000.
+On a clear sentence, "I want to send $5,000 to my external bank account.", the three sessions behave as follows. A guest is denied because they are not signed in. A customer with no balance is denied for insufficient funds. A customer with $10,000 is allowed; the workflow settles the wire, leaving $5,000.
 
 ## What the router does not understand
 
@@ -207,7 +280,7 @@ These showed up in live checks before `route()` existed:
 
 With `route()`, one live run gave:
 
-- "Close this account and send $500 to my external bank account." (admin) Jev counted several. MedGemma split it into "Close this account." and "Send $500 to my external bank account.". Jev labeled them delete (0.95) and wire (0.98). The rule put the wire first. It stopped at confirmation, and "Close this account." was listed as a follow-up.
+- "Close this account and send $500 to my external bank account." (admin) Jev counted several. MedGemma split it into "Close this account." and "Send $500 to my external bank account.". Jev labeled them delete (0.95) and wire (0.98). The rule put the wire first. It stopped at confirmation (a step since removed; the wire now executes), and "Close this account." was listed as a follow-up.
 - "Close this account and send the remaining cash to my external bank account." The same split and order. The wire was denied because "remaining cash" is not an amount, so nothing was listed.
 - "Show my balance and then wire $500 to my external bank account." The balance view executed, and the wire was listed.
 - "How much money do I have before I wire funds out?" Jev counted one request. The balance view executed.
@@ -312,10 +385,10 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 | delete_denied_for_customer | Only an admin may delete | unit |
 | `test_router.py` | | |
 | insufficient_funds_suggests_balance_view | A wire above the balance is denied and suggests the balance view | unit |
-| confirm_then_settle_debits_once | Settlement debits once per transfer id | unit |
-| confirm_refused_when_balance_drained | Confirmation is refused when funds are gone | unit |
+| authorize_then_settle_debits_once | Settlement debits once per transfer id | unit |
+| authorize_refused_when_balance_drained | Authorization is refused when funds are gone | unit |
 | jev_none_stops_before_policy | A `none` action is denied before policy | unit |
-| jev_wire_still_needs_confirmation | A wire chosen by the classifier still needs confirmation | unit |
+| jev_wire_is_judged_by_policy | A wire chosen by the classifier is executed only through policy | unit |
 | minilm_disagreement_does_not_override_jev | The explainer never replaces the classifier's choice | unit |
 | explainer_failure_keeps_the_decision | A broken explainer loses its note, never the decision | unit |
 | classifier_failure_denies_without_guessing | A classifier that is down means deny, not a guess | unit |
@@ -326,6 +399,12 @@ OLLAMA_MODELS="medgemma:27b,qwen3.8:27b" uv run pytest tests/test_structured_out
 | route_failed_labeling_denies_without_guessing | A failed labeling is denied | unit |
 | route_none_label_is_ordered_last | A `none` label goes last | unit |
 | live_jev_abstains_on_unrelated_sentence | Real Jev returns `none` for "capital of Portugal" | integration |
+| `test_workflow.py` | | |
+| denied_request_is_refused_and_never_executes | A denial ends in `refused` and moves no money | unit |
+| approved_wire_completes_with_one_debit | An approved wire ends in `completed` with one debit | unit |
+| wire_fails_when_funds_vanish_after_the_decision | Funds are re-checked at execution; the wire fails, no debit | unit |
+| closed_account_blocks_a_later_wire | A deletion closes the account; a later wire fails | unit |
+| closing_twice_fails_the_second_time | A closed account cannot be closed again | unit |
 | `test_jev.py` | | |
 | unsure_action_and_count_become_none | Jev answers under 0.5 become `none` and an unknown count | unit |
 | unsure_label_becomes_none_and_sure_label_is_kept | The same floor applies to split-request labels | unit |
