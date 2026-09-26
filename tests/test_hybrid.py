@@ -149,6 +149,20 @@ def test_ambiguous_margin_denied() -> None:
     assert "ambiguous" in decision.reason
 
 
+def test_minilm_far_from_every_action_denied() -> None:
+    # Nearest action is the always-allowed FAQ at cosine ~0.33, below MIN_SCORE.
+    decision = decide(
+        "Tell me a joke.",
+        _session("funded"),
+        _ledger(Decimal("10000")),
+        query_vector=np.array([-0.5, -0.5, -0.5, 0.3]),
+        action_embeddings=_orthonormal_catalog(),
+    )
+    assert decision.action == "view_public_faq"
+    assert decision.outcome == "deny"
+    assert decision.reason == "similarity below minimum confidence"
+
+
 def test_confirm_then_settle_debits_once() -> None:
     ledger = _ledger(Decimal("10000"))
     transfer = WireTransfer(
